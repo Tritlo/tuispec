@@ -1,0 +1,13 @@
+sh-3.2$ sh -lc 'cd tests/tui && CABAL_DIR=$PWD/.cabal cabal run tui-demo'
+
+STATE SNAPSHOT
+
+STATE page=Counter theme=Ocean help=off counter=0
+
+STATE cursor=0
+
+STATE task0=[ ] smoke assertions
+
+STATE task1=[ ] keyboard flows
+
+STATE task2=[ ] snapshot coverage

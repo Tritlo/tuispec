@@ -6,7 +6,7 @@ Status: Draft for implementation
 ## 1. Purpose
 
 `tuispec` is an internal Haskell testing framework for terminal UIs (TUIs), optimized for agent-driven testing.  
-It is inspired by Playwright ergonomics, but targets Linux terminal apps running inside `tmux`.
+It is inspired by Playwright ergonomics, but targets Linux terminal apps running inside `pty`.
 
 Primary v1 goal:
 - Let developers and agents write reliable black-box TUI tests with reproducible artifacts.
@@ -16,8 +16,8 @@ Primary v1 goal:
 ### 2.1 In Scope (v1)
 
 - Linux only.
-- One `tmux` pane per test.
-- Fresh `tmux` session per test (isolation per test).
+- One `pty` pane per test.
+- Fresh `pty` session per test (isolation per test).
 - Haskell test scripts using a shallow DSL.
 - Selector-style querying on the visible viewport (exact text, regex text, coordinate/region/nth-match targeting).
 - Input actions with key presses and chord combos (`Ctrl`, `Alt`, function keys).
@@ -55,7 +55,7 @@ Primary v1 goal:
 ## 4. Dependencies
 
 Required runtime tools:
-- `tmux`
+- `pty`
 - Linux terminal environment
 
 Optional runtime tools:
@@ -150,7 +150,7 @@ Retries:
 
 ### 6.1 Isolation
 
-- Each test gets a unique `tmux` server/socket + session + pane.
+- Each test gets a unique `pty` server/socket + session + pane.
 - No state is shared across tests.
 - Tests are executed sequentially in v1.
 
@@ -183,7 +183,7 @@ Configurable behavior:
 ### 6.5 Retry Model
 
 Supported:
-- test-level retries (fresh tmux session per attempt)
+- test-level retries (fresh pty session per attempt)
 - step-level retries
 
 Step-level retry constraints:
@@ -218,7 +218,7 @@ Snapshot compare uses light normalization:
 ### 7.3 PNG Sources
 
 Two supported snapshot render backends:
-- `tmux` capture renderer
+- `pty` capture renderer
 - asciinema-frame renderer
 
 One backend is selected as default in `RunOptions`, with ability to override per test or CLI.
@@ -261,7 +261,7 @@ snapshots/
 - loads specs and executes sequentially
 - handles retries and lifecycle
 
-2. tmux transport
+2. pty transport
 - session creation, pane lifecycle, input injection, viewport capture
 
 3. Screen model
@@ -285,10 +285,10 @@ snapshots/
 - JSON
 - Markdown with artifact links
 
-### 8.2 tmux Lifecycle
+### 8.2 pty Lifecycle
 
 Per test:
-1. Start isolated tmux server/session with configured size.
+1. Start isolated pty server/session with configured size.
 2. Launch app command in pane.
 3. Execute test script actions/assertions.
 4. On completion, collect artifacts and teardown session.
@@ -327,7 +327,7 @@ Per test:
 - `--timeout <seconds>`
 - `--retries <n>` (test-level)
 - `--step-retries <n>`
-- `--snapshot-source tmux|asciinema`
+- `--snapshot-source pty|asciinema`
 - `--update-snapshots`
 - `--artifacts-dir <path>`
 - `--json <path>`
@@ -361,7 +361,7 @@ terminal:
   cols: 120
   rows: 40
 snapshot:
-  source: tmux
+  source: pty
   normalization: light
 report:
   json: artifacts/report.json
@@ -416,10 +416,10 @@ Suggested explicit checks:
 
 ## 14. Implementation Milestones
 
-### Milestone 1: Core Runner + tmux Transport
+### Milestone 1: Core Runner + pty Transport
 
 - Spec registration/execution
-- isolated per-test tmux lifecycle
+- isolated per-test pty lifecycle
 - key press + text input
 - visible viewport capture
 - basic CLI pass/fail
@@ -433,7 +433,7 @@ Suggested explicit checks:
 
 ### Milestone 3: Snapshots + Diff + Markdown/JSON Reports
 
-- PNG render from tmux source
+- PNG render from pty source
 - baseline storage + `--update-snapshots`
 - light normalization
 - Markdown report with links
@@ -448,7 +448,7 @@ Suggested explicit checks:
 ## 15. Acceptance Criteria for v1
 
 - A developer can author and run a Haskell DSL test using `test "name" $ \tui -> ...`.
-- Tests run headlessly in Linux with fresh tmux per test.
+- Tests run headlessly in Linux with fresh pty per test.
 - Stream cancellation scenario passes with stable artifacts.
 - Failures produce PNG + viewport text + JSON log + cast file.
 - Snapshot updates and comparisons work via `--update-snapshots`.
@@ -457,5 +457,5 @@ Suggested explicit checks:
 ## 16. Open Items (Need Final Decision Before Build Freeze)
 
 - Exact step-level retry API shape (`step` combinator options and defaults).
-- Default snapshot backend (`tmux` vs `asciinema`) for first release.
+- Default snapshot backend (`pty` vs `asciinema`) for first release.
 - Canonical stable text markers for the Colimit scenario assertions.

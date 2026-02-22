@@ -1,0 +1,5 @@
+sh-3.2$ echo hello
+
+hello
+
+sh-3.2$ hello from tuispec

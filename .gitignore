@@ -1,7 +1,10 @@
 dist-newstyle/
+**/dist-newstyle/
 .cabal/
+**/.cabal/
 *.hi
 *.o
 *.swp
 *.swo
 artifacts/
+out-art/

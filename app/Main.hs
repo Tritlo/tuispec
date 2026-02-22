@@ -1,13 +1,20 @@
 module Main where
 
 import Control.Exception (SomeException, displayException, try)
-import Data.List (isPrefixOf)
-import System.Environment (getArgs)
+import Data.List (isPrefixOf, isSuffixOf)
+import System.Directory
+  ( canonicalizePath
+  , doesDirectoryExist
+  , doesFileExist
+  , listDirectory
+  )
+import System.Environment (getArgs, setEnv)
 import System.Exit (ExitCode(..), exitFailure, exitWith)
+import System.FilePath (takeDirectory, (</>))
 import System.Process (callProcess)
 
 data Command
-  = Run FilePath [String]
+  = Run FilePath [String] [(String, String)]
   | ListTests FilePath
   | Help
   deriving (Eq, Show)
@@ -30,7 +37,12 @@ main = do
         Right content -> do
           let names = extractTestNames (lines content)
           mapM_ putStrLn names
-    Right (Run path passthrough) -> do
+    Right (Run path passthrough envOverrides) -> do
+      mapM_ (uncurry setEnv) envOverrides
+      rootResult <- try (setProjectRootFromSpec path) :: IO (Either SomeException ())
+      case rootResult of
+        Left _ -> pure ()
+        Right () -> pure ()
       runResult <-
         try (callProcess "cabal" (["exec", "runghc", "--", "-isrc", path] <> passthrough))
           :: IO (Either SomeException ())
@@ -48,23 +60,35 @@ parseCommand args =
     ["help"] -> Right Help
     "list" : path : _ -> Right (ListTests path)
     "run" : path : rest ->
-      let passthrough = stripKnownFlags rest
-       in Right (Run path passthrough)
+      let (envOverrides, passthrough) = parseRunFlags rest
+       in Right (Run path passthrough envOverrides)
     _ -> Left "Unknown command."
 
-stripKnownFlags :: [String] -> [String]
-stripKnownFlags [] = []
-stripKnownFlags ("--timeout" : _value : rest) = stripKnownFlags rest
-stripKnownFlags ("--retries" : _value : rest) = stripKnownFlags rest
-stripKnownFlags ("--step-retries" : _value : rest) = stripKnownFlags rest
-stripKnownFlags ("--snapshot-source" : _value : rest) = stripKnownFlags rest
-stripKnownFlags ("--artifacts-dir" : _value : rest) = stripKnownFlags rest
-stripKnownFlags ("--json" : _value : rest) = stripKnownFlags rest
-stripKnownFlags ("--markdown-report" : _value : rest) = stripKnownFlags rest
-stripKnownFlags ("--update-snapshots" : rest) = stripKnownFlags rest
-stripKnownFlags (value : rest)
-  | "--" `isPrefixOf` value = stripKnownFlags rest
-  | otherwise = value : stripKnownFlags rest
+parseRunFlags :: [String] -> ([(String, String)], [String])
+parseRunFlags = go [] []
+ where
+  go envAcc passAcc args =
+    case args of
+      [] -> (reverse envAcc, reverse passAcc)
+      "--timeout" : value : rest ->
+        go (("TUISPEC_TIMEOUT_SECONDS", value) : envAcc) passAcc rest
+      "--retries" : value : rest ->
+        go (("TUISPEC_RETRIES", value) : envAcc) passAcc rest
+      "--step-retries" : value : rest ->
+        go (("TUISPEC_STEP_RETRIES", value) : envAcc) passAcc rest
+      "--artifacts-dir" : value : rest ->
+        go (("TUISPEC_ARTIFACTS_DIR", value) : envAcc) passAcc rest
+      "--update-snapshots" : rest ->
+        go (("TUISPEC_UPDATE_SNAPSHOTS", "true") : envAcc) passAcc rest
+      "--first-match" : rest ->
+        go (("TUISPEC_AMBIGUITY_MODE", "first") : envAcc) passAcc rest
+      "--fail-on-ambiguous" : rest ->
+        go (("TUISPEC_AMBIGUITY_MODE", "fail") : envAcc) passAcc rest
+      value : rest
+        | "--" `isPrefixOf` value ->
+            go envAcc (value : passAcc) rest
+        | otherwise ->
+            go envAcc (value : passAcc) rest
 
 extractTestNames :: [String] -> [String]
 extractTestNames = foldr extract []
@@ -87,6 +111,35 @@ dropUntil needle haystack =
     _ | needle `isPrefixOf` haystack -> Just (drop (length needle) haystack)
     _ : rest -> dropUntil needle rest
 
+setProjectRootFromSpec :: FilePath -> IO ()
+setProjectRootFromSpec specPath = do
+  specAbsolutePath <- canonicalizePath specPath
+  root <- findProjectRoot (takeDirectory specAbsolutePath)
+  setEnv "TUISPEC_PROJECT_ROOT" root
+
+findProjectRoot :: FilePath -> IO FilePath
+findProjectRoot startDir = do
+  absoluteStart <- canonicalizePath startDir
+  go absoluteStart absoluteStart
+ where
+  go startRoot dir = do
+    rootFound <- isProjectRoot dir
+    if rootFound
+      then pure dir
+      else do
+        let parent = takeDirectory dir
+        if parent == dir
+          then pure startRoot
+          else go startRoot parent
+
+isProjectRoot :: FilePath -> IO Bool
+isProjectRoot dir = do
+  hasGit <- doesDirectoryExist (dir </> ".git")
+  hasCabalProject <- doesFileExist (dir </> "cabal.project")
+  entries <- listDirectory dir
+  let hasCabalFile = any (".cabal" `isSuffixOf`) entries
+  pure (hasGit || hasCabalProject || hasCabalFile)
+
 usage :: String
 usage =
   unlines
@@ -96,13 +149,12 @@ usage =
     , "  tuitest run <Spec.hs> [flags]"
     , "  tuitest list <Spec.hs>"
     , ""
-    , "Supported flag shape (currently consumed by future runner wiring):"
+    , "Supported flags:"
     , "  --timeout <seconds>"
     , "  --retries <n>"
     , "  --step-retries <n>"
-    , "  --snapshot-source tmux|asciinema"
     , "  --update-snapshots"
     , "  --artifacts-dir <path>"
-    , "  --json <path>"
-    , "  --markdown-report <path>"
+    , "  --first-match"
+    , "  --fail-on-ambiguous"
     ]

@@ -5,11 +5,11 @@ module TuiSpec.Types
   , App(..)
   , Key(..)
   , Modifier(..)
+  , PtyHandle(..)
   , Rect(..)
   , RunOptions(..)
   , Selector(..)
   , SnapshotName(..)
-  , SnapshotSource(..)
   , Spec(..)
   , StepOptions(..)
   , Tui(..)
@@ -25,6 +25,8 @@ import Data.IORef (IORef)
 import Data.String (IsString(..))
 import Data.Text (Text)
 import qualified Data.Text as T
+import System.IO (Handle)
+import System.Process (ProcessHandle)
 
 data Spec = Spec
   { specName :: String
@@ -36,11 +38,6 @@ data App = App
   , args :: [String]
   }
   deriving (Eq, Show)
-
-data SnapshotSource
-  = SnapshotFromTmux
-  | SnapshotFromAsciinema
-  deriving (Eq, Show, Read)
 
 data AmbiguityMode
   = FailOnAmbiguous
@@ -54,7 +51,6 @@ data RunOptions = RunOptions
   , terminalCols :: Int
   , terminalRows :: Int
   , artifactsDir :: FilePath
-  , snapshotSource :: SnapshotSource
   , ambiguityMode :: AmbiguityMode
   , updateSnapshots :: Bool
   }
@@ -69,7 +65,6 @@ defaultRunOptions =
     , terminalCols = 120
     , terminalRows = 40
     , artifactsDir = "artifacts"
-    , snapshotSource = SnapshotFromTmux
     , ambiguityMode = FailOnAmbiguous
     , updateSnapshots = False
     }
@@ -153,14 +148,27 @@ data Viewport = Viewport
   }
   deriving (Eq, Show)
 
+data PtyHandle = PtyHandle
+  { ptyIn :: Handle
+  , ptyOut :: Handle
+  , ptyProcess :: ProcessHandle
+  }
+
 data TuiState = TuiState
   { launchedApp :: Maybe App
   , visibleBuffer :: Text
+  , rawBuffer :: Text
   , actionLog :: [Text]
+  , snapshotLog :: [Text]
+  , runtimeWarnings :: [Text]
+  , frameLog :: [Text]
   }
 
 data Tui = Tui
   { tuiName :: String
   , tuiOptions :: RunOptions
+  , tuiTestRoot :: FilePath
+  , tuiSnapshotRoot :: FilePath
+  , tuiPty :: Maybe PtyHandle
   , tuiStateRef :: IORef TuiState
   }

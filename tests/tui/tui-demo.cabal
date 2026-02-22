@@ -1,0 +1,23 @@
+cabal-version:      3.8
+name:               tui-demo
+version:            0.1.0.0
+build-type:         Simple
+license:            MIT
+author:             Matthias Pall Gissurarson
+maintainer:         tritlo@users.noreply.github.com
+synopsis:           Simple Brick counter app for tuispec integration testing
+category:           Demo
+
+common common-settings
+    default-language: GHC2021
+    ghc-options: -Wall -threaded -dynamic
+
+executable tui-demo
+    import: common-settings
+    hs-source-dirs: app
+    main-is: Main.hs
+    build-depends:
+        base >=4.16 && <5,
+        brick >=2.4,
+        mtl >=2.2,
+        vty >=6.0
