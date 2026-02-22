@@ -26,10 +26,12 @@ import Control.Exception
   , throwIO
   , try
   )
-import Control.Monad (forM, unless, when)
+import Control.Monad (forM, filterM, unless, when)
 import Data.Char (chr, isAlphaNum, ord, toLower)
 import Data.IORef (modifyIORef', newIORef, readIORef)
-import Data.List (intercalate, isSuffixOf, sort)
+import Data.List (foldl', intercalate, isSuffixOf, sort)
+import qualified Data.IntMap.Strict as IM
+import Data.Maybe (fromMaybe, isJust, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
@@ -47,7 +49,7 @@ import System.Directory
   , removeFile
   , removePathForcibly
   )
-import System.Environment (lookupEnv)
+import System.Environment (getEnvironment, lookupEnv)
 import System.Exit (ExitCode(..))
 import System.FilePath ((</>), takeDirectory)
 import System.IO
@@ -222,6 +224,12 @@ expectSnapshot :: Tui -> SnapshotName -> IO ()
 expectSnapshot tui snapshotName = do
   when (T.null (unSnapshotName snapshotName)) $
     throwIO (AssertionError "snapshot name cannot be empty")
+  _ <- syncVisibleBuffer tui
+  state <- readIORef (tuiStateRef tui)
+  let emuState =
+        emulateAnsi
+          (emptyEmuState (terminalRows (tuiOptions tui)) (terminalCols (tuiOptions tui)))
+          (T.unpack (rawBuffer state))
   viewport <- currentViewport tui
   let snapshotStem = safeFileStem (T.unpack (unSnapshotName snapshotName))
   let actualDir = tuiTestRoot tui </> "snapshots"
@@ -236,7 +244,7 @@ expectSnapshot tui snapshotName = do
   let baselinePngPath = baselineDir </> (snapshotStem <> ".png")
 
   TIO.writeFile actualTextPath normalized
-  renderSnapshotPng actualPngPath normalized
+  renderStyledSnapshotPng actualPngPath emuState
 
   baselineExists <- doesFileExist baselineTextPath
   if updateSnapshots (tuiOptions tui) || not baselineExists
@@ -407,11 +415,13 @@ startPty =
         tryStartScript rest
 
   spawnScript scriptArgs = do
+    processEnv <- withTerminalEnv
     let cp =
           (proc "script" scriptArgs)
             { std_in = CreatePipe
             , std_out = CreatePipe
             , std_err = CreatePipe
+            , env = Just processEnv
             }
     (maybeIn, maybeOut, maybeErr, processHandle) <- createProcess cp
     inputHandle <-
@@ -433,6 +443,14 @@ startPty =
         , ptyOut = outputHandle
         , ptyProcess = processHandle
         }
+
+withTerminalEnv :: IO [(String, String)]
+withTerminalEnv = do
+  existing <- getEnvironment
+  pure (overrideEnv "TERM" "xterm-256color" existing)
+   where
+    overrideEnv key value pairs =
+      (key, value) : filter ((/= key) . fst) pairs
 
 teardownTui :: Tui -> IO ()
 teardownTui tui =
@@ -465,9 +483,12 @@ syncVisibleBuffer tui =
           visibleBuffer <$> readIORef (tuiStateRef tui)
         Right textChunk -> do
           state <- readIORef (tuiStateRef tui)
-          let cleanChunk = normalizeChunk textChunk
-          let nextRaw = rawBuffer state <> cleanChunk
-          let nextVisible = viewportFromRaw (terminalRows (tuiOptions tui)) nextRaw
+          let nextRaw = rawBuffer state <> textChunk
+          let nextVisible =
+                viewportFromAnsiRaw
+                  (terminalRows (tuiOptions tui))
+                  (terminalCols (tuiOptions tui))
+                  nextRaw
           modifyState tui $ \st -> st {rawBuffer = nextRaw, visibleBuffer = nextVisible}
           recordFrame tui nextVisible
           pure nextVisible
@@ -588,32 +609,528 @@ drainPtyOutput outputHandle = T.pack . reverse <$> go []
         charValue <- hGetChar outputHandle
         go (charValue : acc)
 
-normalizeChunk :: Text -> Text
-normalizeChunk =
-  stripAnsi
-    . T.replace "\r\n" "\n"
-    . T.replace "\r" "\n"
+data EmuColor = EmuColor
+  { colorR :: Int
+  , colorG :: Int
+  , colorB :: Int
+  }
 
-stripAnsi :: Text -> Text
-stripAnsi input = T.pack (goNormal (T.unpack input))
+data EmuCellStyle = EmuCellStyle
+  { cellFg :: Maybe EmuColor
+  , cellBg :: Maybe EmuColor
+  , cellBold :: Bool
+  , cellDim :: Bool
+  , cellReverse :: Bool
+  }
+
+data EmuCell = EmuCell
+  { cellValue :: Char
+  , cellStyle :: EmuCellStyle
+  }
+
+data EmuState = EmuState
+  { emuRows :: Int
+  , emuCols :: Int
+  , emuCursorRow :: Int
+  , emuCursorCol :: Int
+  , emuSavedCursor :: Maybe (Int, Int)
+  , emuStateStyle :: EmuCellStyle
+  , emuCells :: IM.IntMap EmuCell
+  }
+
+data SnapshotTheme = GithubDarkHighContrast | GithubLightHighContrast
+  deriving (Eq, Show)
+
+data ThemePalette = ThemePalette
+  { paletteDefaultBg :: EmuColor
+  , paletteDefaultFg :: EmuColor
+  , paletteAnsi16 :: [EmuColor]
+  }
+
+data SnapshotStyledCell = SnapshotStyledCell
+  { styledChar :: Char
+  , styledFgColor :: EmuColor
+  , styledBgColor :: EmuColor
+  }
+
+type SnapshotStyledRow = [SnapshotStyledCell]
+
+defaultCellStyle :: EmuCellStyle
+defaultCellStyle =
+  EmuCellStyle
+    { cellFg = Nothing
+    , cellBg = Nothing
+    , cellBold = False
+    , cellDim = False
+    , cellReverse = False
+    }
+
+emptyEmuState :: Int -> Int -> EmuState
+emptyEmuState rows cols =
+  EmuState
+    { emuRows = max 1 rows
+    , emuCols = max 1 cols
+    , emuCursorRow = 0
+    , emuCursorCol = 0
+    , emuSavedCursor = Nothing
+    , emuStateStyle = defaultCellStyle
+    , emuCells = IM.empty
+    }
+
+defaultSnapshotTheme :: SnapshotTheme
+defaultSnapshotTheme = GithubDarkHighContrast
+
+themePalette :: SnapshotTheme -> ThemePalette
+themePalette GithubDarkHighContrast =
+  ThemePalette
+    { paletteDefaultBg = EmuColor 13 17 23
+    , paletteDefaultFg = EmuColor 222 227 236
+    , paletteAnsi16 =
+        [ EmuColor 13 17 23
+        , EmuColor 248 109 102
+        , EmuColor 117 190 122
+        , EmuColor 248 192 93
+        , EmuColor 125 208 245
+        , EmuColor 199 163 245
+        , EmuColor 67 212 241
+        , EmuColor 214 220 230
+        , EmuColor 88 96 108
+        , EmuColor 255 111 105
+        , EmuColor 151 227 144
+        , EmuColor 255 222 120
+        , EmuColor 143 210 255
+        , EmuColor 220 191 255
+        , EmuColor 140 232 255
+        , EmuColor 255 255 255
+        ]
+    }
+themePalette GithubLightHighContrast =
+  ThemePalette
+    { paletteDefaultBg = EmuColor 255 255 255
+    , paletteDefaultFg = EmuColor 36 41 46
+    , paletteAnsi16 =
+        [ EmuColor 36 41 46
+        , EmuColor 215 58 73
+        , EmuColor 39 121 41
+        , EmuColor 163 98 0
+        , EmuColor 9 105 218
+        , EmuColor 153 57 122
+        , EmuColor 5 134 134
+        , EmuColor 240 246 252
+        , EmuColor 115 115 115
+        , EmuColor 239 83 84
+        , EmuColor 48 144 48
+        , EmuColor 192 154 17
+        , EmuColor 58 104 201
+        , EmuColor 127 68 168
+        , EmuColor 13 151 151
+        , EmuColor 22 27 34
+        ]
+    }
+
+viewportFromAnsiRaw :: Int -> Int -> Text -> Text
+viewportFromAnsiRaw rows cols rawText =
+  renderEmuState (emulateAnsi (emptyEmuState rows cols) (T.unpack rawText))
+
+snapshotStyledRows :: SnapshotTheme -> EmuState -> [SnapshotStyledRow]
+snapshotStyledRows theme stateValue =
+  [ [ snapshotCell row col | col <- [0 .. emuCols stateValue - 1]
+    ]
+    | row <- [0 .. emuRows stateValue - 1]
+  ]
  where
-  goNormal [] = []
-  goNormal ('\ESC' : '[' : rest) = goCsi rest
-  goNormal ('\ESC' : _ : rest) = goNormal rest
-  goNormal (c : rest)
-    | isPrintable c = c : goNormal rest
-    | otherwise = goNormal rest
+  snapshotCell rowValue colValue =
+    maybe (defaultStyledCell theme) (snapshotCellFromEmuCell theme)
+      (IM.lookup (cellIndex stateValue rowValue colValue) (emuCells stateValue))
 
-  goCsi [] = []
-  goCsi (c : rest)
-    | c >= '@' && c <= '~' = goNormal rest
-    | otherwise = goCsi rest
+snapshotCellFromEmuCell :: SnapshotTheme -> EmuCell -> SnapshotStyledCell
+snapshotCellFromEmuCell theme emuCell =
+  SnapshotStyledCell
+    { styledChar = cellValue emuCell
+    , styledFgColor = resolveCellFg theme (cellStyle emuCell)
+    , styledBgColor = resolveCellBg theme (cellStyle emuCell)
+    }
 
-  isPrintable c = c == '\n' || c == '\t' || c >= ' '
+defaultStyledCell :: SnapshotTheme -> SnapshotStyledCell
+defaultStyledCell theme =
+  let palette = themePalette theme
+   in SnapshotStyledCell
+        { styledChar = ' '
+        , styledFgColor = paletteDefaultFg palette
+        , styledBgColor = paletteDefaultBg palette
+        }
 
-viewportFromRaw :: Int -> Text -> Text
-viewportFromRaw rows rawText =
-  T.intercalate "\n" (takeLast rows (T.lines rawText))
+resolveCellFg :: SnapshotTheme -> EmuCellStyle -> EmuColor
+resolveCellFg theme styleValue =
+  if cellReverse styleValue
+    then fromMaybe (paletteDefaultBg palette) (cellBg styleValue)
+    else fromMaybe (paletteDefaultFg palette) (cellFg styleValue)
+  where
+    palette = themePalette theme
+
+resolveCellBg :: SnapshotTheme -> EmuCellStyle -> EmuColor
+resolveCellBg theme styleValue =
+  if cellReverse styleValue
+    then fromMaybe (paletteDefaultFg palette) (cellFg styleValue)
+    else fromMaybe (paletteDefaultBg palette) (cellBg styleValue)
+  where
+    palette = themePalette theme
+
+emulateAnsi :: EmuState -> String -> EmuState
+emulateAnsi stateValue input =
+  case input of
+    [] -> stateValue
+    '\ESC' : '[' : rest ->
+      let (payload, remaining) = span (not . isCsiFinal) rest
+       in case remaining of
+            [] -> stateValue
+            finalChar : tailChars ->
+              emulateAnsi (applyCsi stateValue payload finalChar) tailChars
+    '\ESC' : ']' : rest ->
+      emulateAnsi stateValue (dropOsc rest)
+    '\ESC' : '7' : rest ->
+      emulateAnsi (stateValue {emuSavedCursor = Just (emuCursorRow stateValue, emuCursorCol stateValue)}) rest
+    '\ESC' : '8' : rest ->
+      emulateAnsi (restoreCursor stateValue) rest
+    '\ESC' : 'c' : rest ->
+      emulateAnsi (clearScreen (setCursor 0 0 stateValue)) rest
+    '\ESC' : _ : rest ->
+      emulateAnsi stateValue rest
+    '\r' : rest ->
+      emulateAnsi (stateValue {emuCursorCol = 0}) rest
+    '\n' : rest ->
+      emulateAnsi (stateValue {emuCursorRow = clampRow stateValue (emuCursorRow stateValue + 1)}) rest
+    '\b' : rest ->
+      emulateAnsi (stateValue {emuCursorCol = clampCol stateValue (emuCursorCol stateValue - 1)}) rest
+    '\t' : rest ->
+      let nextTabStop = ((emuCursorCol stateValue `div` 8) + 1) * 8
+       in emulateAnsi (stateValue {emuCursorCol = clampCol stateValue nextTabStop}) rest
+    charValue : rest
+      | charValue >= ' ' ->
+          emulateAnsi (writeCharAtCursor stateValue charValue) rest
+      | otherwise ->
+          emulateAnsi stateValue rest
+ where
+  isCsiFinal c = c >= '@' && c <= '~'
+
+dropOsc :: String -> String
+dropOsc value =
+  case value of
+    [] -> []
+    '\a' : rest -> rest
+    '\ESC' : '\\' : rest -> rest
+    _ : rest -> dropOsc rest
+
+applyCsi :: EmuState -> String -> Char -> EmuState
+applyCsi stateValue payload finalChar =
+  let (isPrivate, paramText) =
+        case payload of
+          '?' : rest -> (True, rest)
+          _ -> (False, payload)
+      params = parseCsiParams paramText
+      paramAt idx defaultValue = fromMaybe defaultValue (safeIndex idx params)
+      modeValue = paramAt 0 0
+      amount = max 1 (paramAt 0 1)
+   in case finalChar of
+        'm' ->
+          applySgr stateValue params
+        'H' ->
+          setCursor (paramAt 0 1 - 1) (paramAt 1 1 - 1) stateValue
+        'f' ->
+          setCursor (paramAt 0 1 - 1) (paramAt 1 1 - 1) stateValue
+        'A' ->
+          stateValue {emuCursorRow = clampRow stateValue (emuCursorRow stateValue - amount)}
+        'B' ->
+          stateValue {emuCursorRow = clampRow stateValue (emuCursorRow stateValue + amount)}
+        'C' ->
+          stateValue {emuCursorCol = clampCol stateValue (emuCursorCol stateValue + amount)}
+        'D' ->
+          stateValue {emuCursorCol = clampCol stateValue (emuCursorCol stateValue - amount)}
+        'G' ->
+          stateValue {emuCursorCol = clampCol stateValue (paramAt 0 1 - 1)}
+        'd' ->
+          stateValue {emuCursorRow = clampRow stateValue (paramAt 0 1 - 1)}
+        'E' ->
+          stateValue
+            { emuCursorRow = clampRow stateValue (emuCursorRow stateValue + amount)
+            , emuCursorCol = 0
+            }
+        'F' ->
+          stateValue
+            { emuCursorRow = clampRow stateValue (emuCursorRow stateValue - amount)
+            , emuCursorCol = 0
+            }
+        'J' ->
+          if modeValue == 2 || modeValue == 3 || modeValue == 0
+            then clearScreen stateValue
+            else stateValue
+        'K' ->
+          clearLine stateValue modeValue
+        's' ->
+          stateValue {emuSavedCursor = Just (emuCursorRow stateValue, emuCursorCol stateValue)}
+        'u' ->
+          restoreCursor stateValue
+        'h' ->
+          if isPrivate && 1049 `elem` params
+            then clearScreen (setCursor 0 0 stateValue)
+            else stateValue
+        'l' ->
+          if isPrivate && 1049 `elem` params
+            then clearScreen (setCursor 0 0 stateValue)
+            else stateValue
+        _ -> stateValue
+
+applySgr :: EmuState -> [Int] -> EmuState
+applySgr stateValue params =
+  applySgrParams stateValue (if null params then [0] else params)
+ where
+  applySgrParams stateValue [] = stateValue
+  applySgrParams stateValue (param : rest) =
+    case param of
+      0 ->
+        applySgrParams
+          (stateValue {emuStateStyle = defaultCellStyle})
+          rest
+      1 ->
+        applySgrParams
+          (stateValue {emuStateStyle = (emuStateStyle stateValue) {cellBold = True}})
+          rest
+      2 ->
+        applySgrParams
+          (stateValue {emuStateStyle = (emuStateStyle stateValue) {cellDim = True}})
+          rest
+      22 ->
+        applySgrParams
+          (stateValue {emuStateStyle = (emuStateStyle stateValue) {cellBold = False, cellDim = False}})
+          rest
+      7 ->
+        applySgrParams
+          (stateValue {emuStateStyle = (emuStateStyle stateValue) {cellReverse = True}})
+          rest
+      27 ->
+        applySgrParams
+          (stateValue {emuStateStyle = (emuStateStyle stateValue) {cellReverse = False}})
+          rest
+      39 -> applySgrParams (clearCellForeground stateValue) rest
+      49 -> applySgrParams (clearCellBackground stateValue) rest
+      x | x >= 30 && x <= 37 ->
+        applySgrParams (setCellForeground stateValue (mapBasicColor (x - 30))) rest
+      x | x >= 90 && x <= 97 ->
+        applySgrParams (setCellForeground stateValue (mapBasicColor (x - 90 + 8))) rest
+      x | x >= 40 && x <= 47 ->
+        applySgrParams (setCellBackground stateValue (mapBasicColor (x - 40))) rest
+      x | x >= 100 && x <= 107 ->
+        applySgrParams (setCellBackground stateValue (mapBasicColor (x - 100 + 8))) rest
+      38 ->
+        let (nextState, remaining) = parseDynamicColor setCellForeground stateValue rest
+         in applySgrParams nextState remaining
+      48 ->
+        let (nextState, remaining) = parseDynamicColor setCellBackground stateValue rest
+         in applySgrParams nextState remaining
+      _ -> applySgrParams stateValue rest
+   where
+    clearCellForeground st = st {emuStateStyle = (emuStateStyle st) {cellFg = Nothing}}
+    clearCellBackground st = st {emuStateStyle = (emuStateStyle st) {cellBg = Nothing}}
+    setCellForeground st color = st {emuStateStyle = (emuStateStyle st) {cellFg = Just color}}
+    setCellBackground st color = st {emuStateStyle = (emuStateStyle st) {cellBg = Just color}}
+
+    parseDynamicColor setFn st stRaw =
+      case stRaw of
+        [] -> (st, [])
+        mode : remaining ->
+          if mode == 2 && length remaining >= 3
+            then
+              let r = colorSafe (remaining !! 0)
+                  g = colorSafe (remaining !! 1)
+                  b = colorSafe (remaining !! 2)
+               in (setFn st (EmuColor r g b), drop 3 remaining)
+            else if mode == 5 && not (null remaining)
+              then
+                let colorValue = colorSafe (head remaining)
+                 in (setFn st (colorFromCode colorValue), tail remaining)
+              else (st, remaining)
+
+    colorSafe value = max 0 (min 255 value)
+
+    mapBasicColor code
+      | code >= 0 && code < 16 =
+        fromMaybe
+          (EmuColor 0 0 0)
+          (safeIndex code (paletteAnsi16 (themePalette defaultSnapshotTheme)))
+      | otherwise = EmuColor 0 0 0
+
+    colorFromCode value =
+      EmuColor r g b
+      where
+        (r, g, b) = ansiColorFromCode value
+
+ansiColorFromCode :: Int -> (Int, Int, Int)
+ansiColorFromCode value
+  | value >= 0 && value < 16 =
+      let EmuColor rValue gValue bValue =
+            fromMaybe (EmuColor 0 0 0) (safeIndex value (paletteAnsi16 (themePalette defaultSnapshotTheme)))
+       in (rValue, gValue, bValue)
+  | value >= 16 && value <= 231 =
+      let level v = (v * 51)
+          rValue = level ((value - 16) `div` 36)
+          gValue = level (((value - 16) `div` 6) `mod` 6)
+          bValue = level ((value - 16) `mod` 6)
+       in (rValue, gValue, bValue)
+  | value >= 232 && value <= 255 =
+      let gray = 8 + (value - 232) * 10
+       in (gray, gray, gray)
+  | otherwise = (0, 0, 0)
+fromRgb :: (Int, Int, Int) -> EmuColor
+fromRgb (rValue, gValue, bValue) =
+  EmuColor
+    (max 0 (min 255 rValue))
+    (max 0 (min 255 gValue))
+    (max 0 (min 255 bValue))
+
+parseCsiParams :: String -> [Int]
+parseCsiParams value =
+  case splitOnSemicolon value of
+    [] -> [0]
+    parts -> map parsePart parts
+ where
+  parsePart "" = 0
+  parsePart part = fromMaybe 0 (readMaybe part)
+
+splitOnSemicolon :: String -> [String]
+splitOnSemicolon value =
+  case break (== ';') value of
+    (headPart, []) -> [headPart]
+    (headPart, _ : rest) -> headPart : splitOnSemicolon rest
+
+setCursor :: Int -> Int -> EmuState -> EmuState
+setCursor rowValue colValue stateValue =
+  stateValue
+    { emuCursorRow = clampRow stateValue rowValue
+    , emuCursorCol = clampCol stateValue colValue
+    }
+
+restoreCursor :: EmuState -> EmuState
+restoreCursor stateValue =
+  case emuSavedCursor stateValue of
+    Nothing -> stateValue
+    Just (rowValue, colValue) ->
+      setCursor rowValue colValue stateValue
+
+clearScreen :: EmuState -> EmuState
+clearScreen stateValue = stateValue {emuCells = IM.empty}
+
+clearLine :: EmuState -> Int -> EmuState
+clearLine stateValue modeValue =
+  stateValue {emuCells = foldl' (flip IM.delete) (emuCells stateValue) lineIndexes}
+ where
+  rowValue = emuCursorRow stateValue
+  colValue = emuCursorCol stateValue
+  cols = emuCols stateValue
+  indexesFor rangeStart rangeEnd =
+    [ cellIndex stateValue rowValue col
+    | col <- [rangeStart .. rangeEnd]
+    ]
+  lineIndexes =
+    case modeValue of
+      1 -> indexesFor 0 colValue
+      2 -> indexesFor 0 (cols - 1)
+      _ -> indexesFor colValue (cols - 1)
+
+writeCharAtCursor :: EmuState -> Char -> EmuState
+writeCharAtCursor stateValue charValue =
+  advanceCursor $
+    if not (inBounds stateValue rowValue colValue)
+      then stateValue
+      else
+        let indexValue = cellIndex stateValue rowValue colValue
+            newCell =
+              EmuCell
+                { cellValue = charValue
+                , cellStyle = emuStateStyle stateValue
+                }
+            nextCells =
+              IM.insert indexValue newCell (emuCells stateValue)
+         in stateValue {emuCells = nextCells}
+ where
+  rowValue = emuCursorRow stateValue
+  colValue = emuCursorCol stateValue
+
+  advanceCursor st =
+    let nextCol = emuCursorCol st + 1
+     in if nextCol >= emuCols st
+          then
+            st
+              { emuCursorCol = 0
+              , emuCursorRow = clampRow st (emuCursorRow st + 1)
+              }
+          else st {emuCursorCol = nextCol}
+
+inBounds :: EmuState -> Int -> Int -> Bool
+inBounds stateValue rowValue colValue =
+  rowValue >= 0
+    && colValue >= 0
+    && rowValue < emuRows stateValue
+    && colValue < emuCols stateValue
+
+clampRow :: EmuState -> Int -> Int
+clampRow stateValue rowValue =
+  max 0 (min (emuRows stateValue - 1) rowValue)
+
+clampCol :: EmuState -> Int -> Int
+clampCol stateValue colValue =
+  max 0 (min (emuCols stateValue - 1) colValue)
+
+cellIndex :: EmuState -> Int -> Int -> Int
+cellIndex stateValue rowValue colValue =
+  rowValue * emuCols stateValue + colValue
+
+renderEmuState :: EmuState -> Text
+renderEmuState stateValue =
+  T.intercalate "\n" (map renderRow [0 .. emuRows stateValue - 1])
+ where
+  renderRow rowValue =
+    T.dropWhileEnd (== ' ') $
+      T.pack
+        [ maybe ' ' (cellValue) (IM.lookup (cellIndex stateValue rowValue colValue) (emuCells stateValue))
+        | colValue <- [0 .. emuCols stateValue - 1]
+        ]
+
+serializeSnapshot :: SnapshotTheme -> EmuState -> String
+serializeSnapshot theme stateValue =
+  "{"
+    <> "\"theme\":\"" <> snapshotThemeName theme <> "\","
+    <> "\"defaultFg\":" <> colorJson (paletteDefaultFg (themePalette theme)) <> ","
+    <> "\"defaultBg\":" <> colorJson (paletteDefaultBg (themePalette theme)) <> ","
+    <> "\"rows\":" <> show (emuRows stateValue) <> ","
+    <> "\"cols\":" <> show (emuCols stateValue) <> ","
+    <> "\"cells\":["
+    <> intercalate "," (map serializeSnapshotRow (snapshotStyledRows theme stateValue))
+    <> "]}"
+ where
+  serializeSnapshotRow rowValue =
+    "["
+      <> intercalate "," (map serializeSnapshotCell rowValue)
+      <> "]"
+
+  serializeSnapshotCell cellValue =
+    "["
+      <> intercalate
+        ","
+        [ show (ord (styledChar cellValue))
+        , colorJson (styledFgColor cellValue)
+        , colorJson (styledBgColor cellValue)
+        ]
+      <> "]"
+
+  colorJson colorValue =
+    let EmuColor rValue gValue bValue = colorValue
+     in "["
+          <> intercalate "," (map show [rValue, gValue, bValue])
+          <> "]"
+
+snapshotThemeName :: SnapshotTheme -> String
+snapshotThemeName GithubDarkHighContrast = "github-dark-high-contrast"
+snapshotThemeName GithubLightHighContrast = "github-light-high-contrast"
 
 takeLast :: Int -> [a] -> [a]
 takeLast count values
@@ -790,6 +1307,27 @@ renderDiffSideBySide expected actual =
 renderSnapshotPng :: FilePath -> Text -> IO ()
 renderSnapshotPng = renderTextPng
 
+renderStyledSnapshotPng :: FilePath -> EmuState -> IO ()
+renderStyledSnapshotPng outPath emuState = do
+  maybeFontPath <- resolveFontPath
+  let fontArg = fromMaybe "" maybeFontPath
+  createDirectoryIfMissing True (takeDirectory outPath)
+  (tmpInPath, tmpHandle) <- openTempFile (takeDirectory outPath) "snapshot-styled-"
+  TIO.hPutStr tmpHandle (T.pack (serializeSnapshot defaultSnapshotTheme emuState))
+  hClose tmpHandle
+  let args =
+        ["-c", pythonStyledRenderScript, tmpInPath, outPath, fontArg]
+  result <- readCreateProcessWithExitCode (proc "python3" args) ""
+  ignoreIOError (removeFile tmpInPath)
+  case result of
+    (ExitSuccess, _, _) -> pure ()
+    (_, _, stderrText) ->
+      throwIO $
+        AssertionError
+          ( "Failed to render styled PNG (python3 + Pillow required in PATH). "
+              <> stderrText
+          )
+
 renderTextDiff :: Text -> Text -> String
 renderTextDiff expected actual =
   unlines $
@@ -818,11 +1356,14 @@ renderTextDiff expected actual =
 
 renderTextPng :: FilePath -> Text -> IO ()
 renderTextPng outPath textValue = do
+  maybeFontPath <- resolveFontPath
+  let fontArg = fromMaybe "" maybeFontPath
   createDirectoryIfMissing True (takeDirectory outPath)
   (tmpInPath, tmpHandle) <- openTempFile (takeDirectory outPath) "snapshot-"
   TIO.hPutStr tmpHandle textValue
   hClose tmpHandle
-  let args = ["-c", pythonRenderScript, tmpInPath, outPath]
+  let args =
+        ["-c", pythonRenderScript, tmpInPath, outPath, fontArg]
   result <- readCreateProcessWithExitCode (proc "python3" args) ""
   ignoreIOError (removeFile tmpInPath)
   case result of
@@ -840,9 +1381,31 @@ pythonRenderScript =
     [ "import sys"
     , "from PIL import Image, ImageDraw, ImageFont"
     , "inp, out = sys.argv[1], sys.argv[2]"
+    , "font_path = sys.argv[3] if len(sys.argv) > 3 else ''"
+    , "font_candidates = []"
+    , "if font_path:"
+    , "    font_candidates.append(font_path)"
+    , "font_candidates += ["
+    , "    './fonts/IosevkaMono-Regular.ttc',"
+    , "    './fonts/Iosevka-Regular.ttc',"
+    , "    './fonts/IosevkaMono-Regular.ttf',"
+    , "    './fonts/Iosevka-Regular.ttf',"
+    , "    '/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf',"
+    , "    '/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf'"
+    , " ]"
+    , "font = None"
+    , "for candidate in font_candidates:"
+    , "    if not candidate:"
+    , "        continue"
+    , "    try:"
+    , "        font = ImageFont.truetype(candidate, 14)"
+    , "        break"
+    , "    except OSError:"
+    , "        continue"
+    , "if font is None:"
+    , "    font = ImageFont.load_default()"
     , "with open(inp, 'r', encoding='utf-8', errors='replace') as f:"
     , "    lines = f.read().splitlines()"
-    , "font = ImageFont.load_default()"
     , "probe = font.getbbox('Hg')"
     , "line_h = (probe[3] - probe[1]) + 4"
     , "max_w = 0"
@@ -855,6 +1418,65 @@ pythonRenderScript =
     , "y = 10"
     , "for line in lines:"
     , "    draw.text((10, y), line, fill='black', font=font)"
+    , "    y += line_h"
+    , "img.save(out, 'PNG')"
+    ]
+
+pythonStyledRenderScript :: String
+pythonStyledRenderScript =
+  unlines
+    [ "import json"
+    , "import sys"
+    , "from PIL import Image, ImageDraw, ImageFont"
+    , "inp, out = sys.argv[1], sys.argv[2]"
+    , "font_path = sys.argv[3] if len(sys.argv) > 3 else ''"
+    , "font_candidates = []"
+    , "if font_path:"
+    , "    font_candidates.append(font_path)"
+    , "font_candidates += ["
+    , "    './fonts/IosevkaMono-Regular.ttc',"
+    , "    './fonts/Iosevka-Regular.ttc',"
+    , "    './fonts/IosevkaMono-Regular.ttf',"
+    , "    './fonts/Iosevka-Regular.ttf',"
+    , "    '/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf',"
+    , "    '/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf'"
+    , " ]"
+    , "font = None"
+    , "for candidate in font_candidates:"
+    , "    if not candidate:"
+    , "        continue"
+    , "    try:"
+    , "        font = ImageFont.truetype(candidate, 16)"
+    , "        break"
+    , "    except OSError:"
+    , "        continue"
+    , "if font is None:"
+    , "    font = ImageFont.load_default()"
+    , "with open(inp, 'r', encoding='utf-8', errors='replace') as f:"
+    , "    payload = json.load(f)"
+    , "rows = payload['rows']"
+    , "cols = payload['cols']"
+    , "cells = payload['cells']"
+    , "probe = font.getbbox('Hg')"
+    , "line_h = (probe[3] - probe[1]) + 4"
+    , "cell_w = font.getbbox('W')[2] - font.getbbox('W')[0] + 1"
+    , "width = max(1, cols * cell_w + 10)"
+    , "height = max(1, rows * line_h + 10)"
+    , "img = Image.new('RGB', (width, height), tuple(payload['defaultBg']) if 'defaultBg' in payload else (13, 17, 23))"
+    , "draw = ImageDraw.Draw(img)"
+    , "y = 5"
+    , "for row in cells:"
+    , "    x = 5"
+    , "    for cell in row:"
+    , "        if len(cell) != 3:"
+    , "            continue"
+    , "        ch = chr(cell[0])"
+    , "        fg = tuple(cell[1])"
+    , "        bg = tuple(cell[2])"
+    , "        rect = (x, y, x + cell_w, y + line_h)"
+    , "        draw.rectangle(rect, fill=bg)"
+    , "        draw.text((x, y), ch, fill=fg, font=font)"
+    , "        x += cell_w"
     , "    y += line_h"
     , "img.save(out, 'PNG')"
     ]
@@ -995,14 +1617,31 @@ printSummary results = do
 
 resolveSnapshotsBaseDir :: IO FilePath
 resolveSnapshotsBaseDir = do
-  projectRootOverride <- lookupEnv "TUISPEC_PROJECT_ROOT"
-  projectRoot <-
-    case projectRootOverride of
-      Just override -> canonicalizePath override
-      Nothing -> do
-        cwd <- getCurrentDirectory
-        locateProjectRoot cwd
+  projectRoot <- resolveProjectRoot
   canonicalizePath (projectRoot </> "snapshots")
+
+resolveProjectRoot :: IO FilePath
+resolveProjectRoot = do
+  projectRootOverride <- lookupEnv "TUISPEC_PROJECT_ROOT"
+  case projectRootOverride of
+    Just override -> canonicalizePath override
+    Nothing -> do
+      cwd <- getCurrentDirectory
+      locateProjectRoot cwd
+
+resolveFontPath :: IO (Maybe FilePath)
+resolveFontPath = do
+  projectRoot <- resolveProjectRoot
+  envFont <- lookupEnv "TUISPEC_FONT_PATH"
+  let candidateFonts =
+        maybe [] (\p -> [p, projectRoot </> p]) envFont
+          <> [ projectRoot </> "fonts" </> "IosevkaMono-Regular.ttc"
+             , projectRoot </> "fonts" </> "Iosevka-Regular.ttc"
+             , projectRoot </> "fonts" </> "IosevkaMono-Regular.ttf"
+             , projectRoot </> "fonts" </> "Iosevka-Regular.ttf"
+             ]
+  existing <- filterM doesFileExist candidateFonts
+  pure (listToMaybe existing)
 
 locateProjectRoot :: FilePath -> IO FilePath
 locateProjectRoot startDir = do
