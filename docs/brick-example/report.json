@@ -1,6 +1,6 @@
 {
   "tests": [
-    {"name": "brick showcase main flow", "slug": "brick-showcase-main-flow", "status": "passed", "durationMs": 2677, "attempts": 2, "artifacts": "tests/brick-showcase-main-flow/attempt-final"},
-    {"name": "brick showcase test isolation reset", "slug": "brick-showcase-test-isolation-reset", "status": "passed", "durationMs": 807, "attempts": 1, "artifacts": "tests/brick-showcase-test-isolation-reset/attempt-final"}
+    {"name": "brick panes main flow", "slug": "brick-panes-main-flow", "status": "passed", "durationMs": 2726, "attempts": 1, "artifacts": "tests/brick-panes-main-flow/attempt-final"},
+    {"name": "brick panes reset isolation", "slug": "brick-panes-reset-isolation", "status": "passed", "durationMs": 1181, "attempts": 1, "artifacts": "tests/brick-panes-reset-isolation/attempt-final"}
   ]
 }
