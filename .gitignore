@@ -1,0 +1,7 @@
+dist-newstyle/
+.cabal/
+*.hi
+*.o
+*.swp
+*.swo
+artifacts/

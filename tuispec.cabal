@@ -1,0 +1,52 @@
+cabal-version:      3.8
+name:               tuispec
+version:            0.1.0.0
+build-type:         Simple
+license:            NONE
+author:             Tritlo
+maintainer:         tritlo@users.noreply.github.com
+synopsis:           Starter framework for testing terminal UIs with tmux
+category:           Testing
+extra-source-files:
+    README.md
+    tuispec-v1-spec.md
+
+common common-settings
+    default-language: GHC2021
+    ghc-options: -Wall
+
+library
+    import: common-settings
+    hs-source-dirs: src
+    exposed-modules:
+        TuiSpec
+        TuiSpec.Types
+        TuiSpec.Runner
+    build-depends:
+        base >=4.16 && <5,
+        directory >=1.3,
+        filepath >=1.4,
+        text >=1.2,
+        time >=1.9
+
+executable tuitest
+    import: common-settings
+    hs-source-dirs: app
+    main-is: Main.hs
+    build-depends:
+        base >=4.16 && <5,
+        directory >=1.3,
+        filepath >=1.4,
+        process >=1.6,
+        text >=1.2,
+        tuispec
+
+test-suite tuispec-smoke
+    import: common-settings
+    type: exitcode-stdio-1.0
+    hs-source-dirs: test
+    main-is: Spec.hs
+    build-depends:
+        base >=4.16 && <5,
+        text >=1.2,
+        tuispec
