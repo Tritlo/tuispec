@@ -15,6 +15,7 @@ module TuiSpec.Replay (
     appendRecordingEvent,
     closeRecording,
     openRecording,
+    streamReplayFrames,
     streamReplayRequests,
 ) where
 
@@ -33,11 +34,12 @@ import System.Directory (createDirectoryIfMissing)
 import System.FilePath (takeDirectory)
 import System.IO (Handle, IOMode (AppendMode, ReadMode), hClose, hFlush, hIsEOF, hPutStrLn, openFile)
 
--- | Direction of a recorded JSON-RPC line.
+-- | Direction of a recorded JSON-RPC line, or a viewport frame capture.
 data RecordingDirection
     = DirectionRequest
     | DirectionResponse
     | DirectionNotification
+    | DirectionFrame
     deriving (Eq, Show)
 
 instance ToJSON RecordingDirection where
@@ -46,6 +48,7 @@ instance ToJSON RecordingDirection where
             DirectionRequest -> toJSON ("request" :: Text)
             DirectionResponse -> toJSON ("response" :: Text)
             DirectionNotification -> toJSON ("notification" :: Text)
+            DirectionFrame -> toJSON ("frame" :: Text)
 
 instance FromJSON RecordingDirection where
     parseJSON value = do
@@ -54,7 +57,8 @@ instance FromJSON RecordingDirection where
             "request" -> pure DirectionRequest
             "response" -> pure DirectionResponse
             "notification" -> pure DirectionNotification
-            _ -> fail "direction must be one of: request, response, notification"
+            "frame" -> pure DirectionFrame
+            _ -> fail "direction must be one of: request, response, notification, frame"
 
 -- | Single JSONL event written to disk.
 data RecordingEvent = RecordingEvent
@@ -80,7 +84,7 @@ instance FromJSON RecordingEvent where
                 <*> o .: "direction"
                 <*> o .: "line"
 
--- | Replay speed used by @streamReplayRequests@.
+-- | Replay speed used by @streamReplayRequests@ and @streamReplayFrames@.
 data ReplaySpeed
     = ReplayAsFastAsPossible
     | ReplayRealTime
@@ -132,6 +136,20 @@ number of request events replayed.
 -}
 streamReplayRequests :: ReplaySpeed -> FilePath -> (Text -> IO ()) -> IO Int
 streamReplayRequests speed path runRequest =
+    streamFilteredEvents speed path DirectionRequest runRequest
+
+{- | Stream replay of frame events from a JSONL recording file. Each
+captured viewport frame is dispatched to the callback with inter-frame
+timing preserved in real-time mode. Returns the total number of frames
+replayed.
+-}
+streamReplayFrames :: ReplaySpeed -> FilePath -> (Text -> IO ()) -> IO Int
+streamReplayFrames speed path showFrame =
+    streamFilteredEvents speed path DirectionFrame showFrame
+
+-- | Internal: stream events matching a given direction from a JSONL file.
+streamFilteredEvents :: ReplaySpeed -> FilePath -> RecordingDirection -> (Text -> IO ()) -> IO Int
+streamFilteredEvents speed path direction callback =
     bracket (openFile path ReadMode) hClose $ \handle ->
         go handle (1 :: Int) Nothing 0
   where
@@ -149,7 +167,7 @@ streamReplayRequests speed path runRequest =
                             throwIO
                                 (RecordingParseError path ("line " <> show lineNumber <> ": " <> err))
                         Right event
-                            | recordingDirection event == DirectionRequest -> do
+                            | recordingDirection event == direction -> do
                                 case speed of
                                     ReplayAsFastAsPossible -> pure ()
                                     ReplayRealTime ->
@@ -158,7 +176,7 @@ streamReplayRequests speed path runRequest =
                                             Just prev -> do
                                                 let delta = recordingTimestampMicros event - recordingTimestampMicros prev
                                                 when (delta > 0) $ threadDelay (fromIntegral delta)
-                                runRequest (recordingLine event)
+                                callback (recordingLine event)
                                 go handle (lineNumber + 1) (Just event) (count + 1)
                             | otherwise ->
                                 go handle (lineNumber + 1) maybePrev count

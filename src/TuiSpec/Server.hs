@@ -12,7 +12,7 @@ module TuiSpec.Server (
     runServer,
 ) where
 
-import Control.Concurrent (threadDelay)
+import Control.Concurrent (forkIO, threadDelay)
 import Control.Exception (SomeException, displayException, finally, throwIO, try)
 import Control.Monad (foldM, when)
 import Data.Aeson (FromJSON (parseJSON), Result (Error, Success), Value (Null, Object), eitherDecode, eitherDecodeStrict', encode, fromJSON, object, withObject, (.:), (.:?), (.=))
@@ -44,7 +44,7 @@ import System.IO.Error (isEOFError, tryIOError)
 import System.Posix.Process (exitImmediately)
 import System.Posix.Signals (Handler (Catch), installHandler, sigHUP)
 import TuiSpec.Render (renderAnsiSnapshotFileWithFont)
-import TuiSpec.Replay (RecordingDirection (DirectionNotification, DirectionRequest, DirectionResponse), RecordingHandle, ReplaySpeed (ReplayAsFastAsPossible, ReplayRealTime), appendRecordingEvent, closeRecording, openRecording, streamReplayRequests)
+import TuiSpec.Replay (RecordingDirection (DirectionFrame, DirectionNotification, DirectionRequest, DirectionResponse), RecordingHandle, ReplaySpeed (ReplayAsFastAsPossible, ReplayRealTime), appendRecordingEvent, closeRecording, openRecording, streamReplayRequests)
 import TuiSpec.Runner (currentView, defaultWaitOptionsFor, dumpView, expectNotVisible, expectSnapshot, expectVisible, killSessionChildrenNow, launch, openSession, press, pressCombo, renderAnsiViewportText, sendLine, serializeAnsiSnapshot, typeText, waitForSelectorWithAmbiguity)
 import TuiSpec.Types (AmbiguityMode (FailOnAmbiguous, FirstVisibleMatch, LastVisibleMatch), App (..), Key (..), Modifier (Alt, Control, Shift), Rect (Rect), RunOptions (..), Selector (..), SnapshotName (SnapshotName), Tui (..), WaitOptions (..), defaultRunOptions, tuispecVersion)
 
@@ -70,6 +70,7 @@ data ActiveSession = ActiveSession
 data RecordingSession = RecordingSession
     { activeRecordingPath :: FilePath
     , activeRecordingHandle :: RecordingHandle
+    , activeFrameSamplerStop :: Maybe (IORef Bool)
     }
 
 data ViewSubscription = ViewSubscription
@@ -554,13 +555,23 @@ dispatchRecordingStart state paramsValue =
                 closeActiveRecording state
                 handle <- openRecording (recordingStartPath params)
                 canonicalPath <- canonicalizePath (recordingStartPath params)
+                let intervalMs = recordingFrameIntervalMs params
+                samplerStop <-
+                    if intervalMs > 0
+                        then do
+                            stopRef <- newIORef False
+                            lastFrameRef <- newIORef ("" :: Text)
+                            _ <- forkIO (frameSamplerLoop state handle lastFrameRef stopRef intervalMs)
+                            pure (Just stopRef)
+                        else pure Nothing
                 writeIORef
                     (stateRecording state)
-                    (Just (RecordingSession canonicalPath handle))
+                    (Just (RecordingSession canonicalPath handle samplerStop))
                 pure
                     ( object
                         [ "ok" .= True
                         , "path" .= canonicalPath
+                        , "frameIntervalMs" .= intervalMs
                         ]
                     )
 
@@ -659,6 +670,11 @@ closeActiveRecording state = do
     case maybeRecording of
         Nothing -> pure ()
         Just recording -> do
+            case activeFrameSamplerStop recording of
+                Just stopRef -> do
+                    writeIORef stopRef True
+                    threadDelay 50000
+                Nothing -> pure ()
             closeRecording (activeRecordingHandle recording)
             writeIORef (stateRecording state) Nothing
 
@@ -741,6 +757,33 @@ withActiveRecording state action = do
     case maybeRecording of
         Nothing -> pure ()
         Just recording -> action recording
+
+{- | Background thread that samples the viewport at a fixed interval and
+writes frame events to the recording JSONL. Deduplicates consecutive
+identical frames. Exits when the stop flag is set to @True@.
+-}
+frameSamplerLoop :: ServerState -> RecordingHandle -> IORef Text -> IORef Bool -> Int -> IO ()
+frameSamplerLoop state handle lastFrameRef stopRef intervalMs = loop
+  where
+    loop = do
+        threadDelay (intervalMs * 1000)
+        stopped <- readIORef stopRef
+        if stopped
+            then pure ()
+            else do
+                maybeActive <- readIORef (stateActiveSession state)
+                case maybeActive of
+                    Nothing -> loop
+                    Just active -> do
+                        viewResult <- try (currentView (activeTui active)) :: IO (Either SomeException Text)
+                        case viewResult of
+                            Left _ -> loop
+                            Right frameText -> do
+                                lastFrame <- readIORef lastFrameRef
+                                when (frameText /= lastFrame) $ do
+                                    writeIORef lastFrameRef frameText
+                                    appendRecordingEvent handle DirectionFrame frameText
+                                loop
 
 decodeParamsValue :: (FromJSON a) => Value -> Either RpcFailure a
 decodeParamsValue paramsValue =
@@ -1174,6 +1217,7 @@ instance FromJSON BatchStep where
 
 data RecordingStartParams = RecordingStartParams
     { recordingStartPath :: FilePath
+    , recordingFrameIntervalMs :: Int
     }
 
 instance FromJSON RecordingStartParams where
@@ -1181,6 +1225,7 @@ instance FromJSON RecordingStartParams where
         withObject "RecordingStartParams" $ \o ->
             RecordingStartParams
                 <$> o .: "path"
+                <*> o .:? "frameIntervalMs" AesonTypes..!= 200
 
 data ReplayParams = ReplayParams
     { replayPath :: FilePath

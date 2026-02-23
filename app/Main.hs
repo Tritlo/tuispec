@@ -1,13 +1,15 @@
 module Main where
 
 import Data.List (isSuffixOf)
+import Data.Text (Text)
 import Data.Text.IO qualified as TIO
 import Data.Version (showVersion)
 import Options.Applicative
 import Paths_tuispec (version)
+import System.IO (hFlush, stdout)
 import Text.Read (readMaybe)
 import TuiSpec.Render (renderAnsiSnapshotFileWithFont, renderAnsiSnapshotTextFile)
-import TuiSpec.Replay (ReplaySpeed (ReplayAsFastAsPossible, ReplayRealTime), streamReplayRequests)
+import TuiSpec.Replay (ReplaySpeed (ReplayAsFastAsPossible, ReplayRealTime), streamReplayFrames, streamReplayRequests)
 import TuiSpec.Server qualified as Server
 import TuiSpec.Types (AmbiguityMode (FailOnAmbiguous, FirstVisibleMatch, LastVisibleMatch))
 
@@ -72,8 +74,12 @@ runCommand parsedCommand =
                     , Server.serverAmbiguityMode = ambiguity options
                     }
         Replay options -> do
-            replayed <- streamReplayRequests (replaySpeed options) (replayInputPath options) TIO.putStrLn
-            putStrLn ("Replayed " <> show replayed <> " request messages")
+            frameCount <- streamReplayFrames (replaySpeed options) (replayInputPath options) displayFrame
+            if frameCount > 0
+                then putStrLn ("\nReplayed " <> show frameCount <> " frames")
+                else do
+                    replayed <- streamReplayRequests (replaySpeed options) (replayInputPath options) TIO.putStrLn
+                    putStrLn ("Replayed " <> show replayed <> " request messages")
 
 commandParserInfo :: ParserInfo Command
 commandParserInfo =
@@ -299,3 +305,9 @@ defaultTextOutputPath input =
     if ".ansi.txt" `isSuffixOf` input
         then take (length input - length (".ansi.txt" :: String)) input <> ".txt"
         else input <> ".txt"
+
+displayFrame :: Text -> IO ()
+displayFrame frameText = do
+    putStr "\ESC[2J\ESC[H"
+    TIO.putStr frameText
+    hFlush stdout
