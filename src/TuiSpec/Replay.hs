@@ -21,6 +21,7 @@ module TuiSpec.Replay (
 
 import Control.Concurrent (threadDelay)
 import Control.Exception (Exception, throwIO)
+import Control.Monad (when)
 import Data.Aeson (FromJSON (parseJSON), ToJSON (toJSON), eitherDecodeStrict', encode, object, withObject, (.:), (.=))
 import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy qualified as BL
@@ -151,33 +152,26 @@ readRecordingEvents path = do
 
 -- | Replay recorded request lines, optionally preserving recorded timing.
 replayRecordedRequests :: ReplaySpeed -> [RecordingEvent] -> (Text -> IO ()) -> IO Int
-replayRecordedRequests replaySpeed events runRequest = do
+replayRecordedRequests speed events runRequest = do
     let requestEvents = filter ((== DirectionRequest) . recordingDirection) events
     case requestEvents of
         [] -> pure 0
         _ -> do
-            _ <- mapM replayOne (zip [0 ..] requestEvents)
+            go Nothing requestEvents
             pure (length requestEvents)
   where
-    replayOne (idx, event) = do
-        maybeDelayMicros <- replayDelayMicros idx event
-        case maybeDelayMicros of
-            Just micros | micros > 0 -> threadDelay micros
-            _ -> pure ()
-        runRequest (recordingLine event)
-
-    requestEventsForTiming = filter ((== DirectionRequest) . recordingDirection) events
-
-    replayDelayMicros idx event =
-        case replaySpeed of
-            ReplayAsFastAsPossible -> pure Nothing
+    go _ [] = pure ()
+    go maybePrev (event : rest) = do
+        case speed of
+            ReplayAsFastAsPossible -> pure ()
             ReplayRealTime ->
-                if idx <= 0
-                    then pure Nothing
-                    else do
-                        let previous = requestEventsForTiming !! (idx - 1)
-                        let delta = recordingTimestampMicros event - recordingTimestampMicros previous
-                        pure (Just (fromIntegral (max 0 delta)))
+                case maybePrev of
+                    Nothing -> pure ()
+                    Just prev -> do
+                        let delta = recordingTimestampMicros event - recordingTimestampMicros prev
+                        when (delta > 0) $ threadDelay (fromIntegral delta)
+        runRequest (recordingLine event)
+        go (Just event) rest
 
 toJsonLine :: RecordingEvent -> String
 toJsonLine = T.unpack . TE.decodeUtf8 . BL.toStrict . encode
