@@ -17,7 +17,7 @@ import System.Directory (canonicalizePath, createDirectoryIfMissing, doesFileExi
 import System.Environment (getEnvironment)
 import System.Exit (ExitCode (ExitSuccess))
 import System.FilePath ((</>))
-import System.IO (BufferMode (LineBuffering), Handle, hFlush, hSetBuffering)
+import System.IO (BufferMode (LineBuffering), Handle, hClose, hFlush, hSetBuffering)
 import System.Process qualified as Process
 import System.Timeout (timeout)
 import Test.Tasty (defaultMain, testGroup)
@@ -382,6 +382,7 @@ startServer exe artifactsRoot serverEnv = do
                 , Process.std_out = Process.CreatePipe
                 , Process.std_err = Process.Inherit
                 , Process.env = Just serverEnv
+                , Process.create_group = True
                 }
     hSetBuffering inputHandle LineBuffering
     hSetBuffering outputHandle LineBuffering
@@ -395,6 +396,7 @@ startServer exe artifactsRoot serverEnv = do
 stopServer :: RpcServer -> IO ()
 stopServer server = do
     _ <- rpcCall server 9999 "server.shutdown" (object []) `catch` ignoreAny
+    hClose (rpcInput server) `catch` ignoreAnyUnit
     Process.terminateProcess (rpcProcess server) `catch` ignoreAnyUnit
     _ <- Process.waitForProcess (rpcProcess server) `catch` ignoreAnyExit
     pure ()
