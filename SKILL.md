@@ -106,3 +106,67 @@ Both commands auto-read rows/cols from `.meta.json`.
 4. run again
 
 `withTuiSession` resets the session output directory each run, keeping artifact output simple and deterministic.
+
+## JSONRPC server workflow
+
+You can also orchestrate a TUI from an external client using:
+
+```bash
+cabal run tuispec -- server --artifact-dir artifacts/server
+```
+
+### Request format
+
+- Send one JSON-RPC request per line on stdin.
+- Read one JSON-RPC response per line on stdout.
+
+### Shutdown semantics
+
+- `server.shutdown` is a hard shutdown:
+  - kills active TUI child process group with `SIGKILL`
+  - exits server immediately (no graceful wait)
+- On `SIGHUP`, the server does the same hard shutdown behavior:
+  - `SIGKILL` to active child process group
+  - immediate process exit
+
+### Example session
+
+Start server:
+
+```bash
+cabal run tuispec -- server --artifact-dir artifacts/server
+```
+
+Then send requests like:
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"name":"demo"}}
+{"jsonrpc":"2.0","id":2,"method":"launch","params":{"command":"sh","args":["-lc","tui-demo"]}}
+{"jsonrpc":"2.0","id":3,"method":"sendKey","params":{"key":"ArrowDown"}}
+{"jsonrpc":"2.0","id":4,"method":"sendKey","params":{"key":"Enter"}}
+{"jsonrpc":"2.0","id":5,"method":"dumpView","params":{"name":"after-enter"}}
+{"jsonrpc":"2.0","id":6,"method":"currentView","params":null}
+{"jsonrpc":"2.0","id":7,"method":"server.shutdown","params":null}
+```
+
+### Supported key strings for `sendKey`
+
+- `Enter`, `Esc`, `Tab`, `Backspace`
+- `ArrowUp`, `ArrowDown`, `ArrowLeft`, `ArrowRight`
+- `F1`..`F12`
+- `Ctrl+X`, `Alt+X`, `Shift+X`
+- single character like `"a"`
+
+### Dump locations
+
+For `initialize` name `demo`:
+
+- `artifacts/server/sessions/demo/snapshots/<name>.ansi.txt`
+- `artifacts/server/sessions/demo/snapshots/<name>.meta.json`
+
+### Rendering dumped views
+
+```bash
+cabal run tuispec -- render artifacts/server/sessions/demo/snapshots/after-enter.ansi.txt
+cabal run tuispec -- render-text artifacts/server/sessions/demo/snapshots/after-enter.ansi.txt
+```

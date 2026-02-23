@@ -22,6 +22,7 @@ library
     exposed-modules:
         TuiSpec
         TuiSpec.Render
+        TuiSpec.Server
         TuiSpec.Types
         TuiSpec.Runner
     build-depends:
@@ -31,12 +32,14 @@ library
         containers >=0.6,
         directory >=1.3,
         filepath >=1.4,
+        jsonrpc >=0.2 && <0.3,
         posix-pty >=0.2,
         process >=1.6,
         tasty >=1.4,
         tasty-hunit >=0.10,
         text >=1.2,
-        time >=1.9
+        time >=1.9,
+        unix >=2.8
 
 executable tuispec
     import: common-settings

@@ -4,10 +4,13 @@ import Data.List (isSuffixOf)
 import Options.Applicative
 import Text.Read (readMaybe)
 import TuiSpec.Render (renderAnsiSnapshotFile, renderAnsiSnapshotTextFile)
+import TuiSpec.Server qualified as Server
+import TuiSpec.Types (AmbiguityMode (FailOnAmbiguous, FirstVisibleMatch))
 
 data Command
     = Render RenderOptions
     | RenderText RenderTextOptions
+    | Server ServerOptions
 
 data RenderOptions = RenderOptions
     { inputPath :: FilePath
@@ -22,6 +25,14 @@ data RenderTextOptions = RenderTextOptions
     , textOutputPath :: Maybe FilePath
     , textCols :: Maybe Int
     , textRows :: Maybe Int
+    }
+
+data ServerOptions = ServerOptions
+    { artifactDir :: FilePath
+    , serverCols :: Int
+    , serverRows :: Int
+    , timeoutSeconds :: Int
+    , ambiguity :: AmbiguityMode
     }
 
 main :: IO ()
@@ -40,6 +51,15 @@ runCommand parsedCommand =
             let outPath = maybe (defaultTextOutputPath (textInputPath options)) id (textOutputPath options)
             renderAnsiSnapshotTextFile (textRows options) (textCols options) (textInputPath options) outPath
             putStrLn ("Rendered " <> outPath)
+        Server options ->
+            Server.runServer
+                Server.ServerOptions
+                    { Server.serverArtifactsDir = artifactDir options
+                    , Server.serverTerminalCols = serverCols options
+                    , Server.serverTerminalRows = serverRows options
+                    , Server.serverTimeoutSeconds = timeoutSeconds options
+                    , Server.serverAmbiguityMode = ambiguity options
+                    }
 
 commandParserInfo :: ParserInfo Command
 commandParserInfo =
@@ -64,6 +84,12 @@ parseCommand =
                 ( info
                     (RenderText <$> parseRenderTextOptions)
                     (progDesc "Render visible plain text from a .ansi.txt snapshot file using terminal emulation")
+                )
+            <> command
+                "server"
+                ( info
+                    (Server <$> parseServerOptions)
+                    (progDesc "Run JSON-RPC server on stdin/stdout for interactive TUI orchestration")
                 )
         )
 
@@ -138,12 +164,68 @@ parseRenderTextOptions =
                 )
             )
 
+parseServerOptions :: Parser ServerOptions
+parseServerOptions =
+    ServerOptions
+        <$> strOption
+            ( long "artifact-dir"
+                <> metavar "PATH"
+                <> help "Artifacts directory base path for server sessions"
+            )
+        <*> option
+            positiveIntReader
+            ( long "cols"
+                <> metavar "N"
+                <> help "Default terminal columns"
+                <> value 134
+                <> showDefault
+            )
+        <*> option
+            positiveIntReader
+            ( long "rows"
+                <> metavar "N"
+                <> help "Default terminal rows"
+                <> value 40
+                <> showDefault
+            )
+        <*> option
+            positiveIntReader
+            ( long "timeout-seconds"
+                <> metavar "N"
+                <> help "Default timeout seconds"
+                <> value 5
+                <> showDefault
+            )
+        <*> option
+            ambiguityModeReader
+            ( long "ambiguity-mode"
+                <> metavar "MODE"
+                <> help "Default ambiguity mode: fail|first-visible"
+                <> value FailOnAmbiguous
+                <> showDefaultWith renderAmbiguityMode
+            )
+
 positiveIntReader :: ReadM Int
 positiveIntReader =
     eitherReader $ \raw ->
         case readMaybe raw :: Maybe Int of
             Just parsed | parsed > 0 -> Right parsed
             _ -> Left "Expected a positive integer"
+
+ambiguityModeReader :: ReadM AmbiguityMode
+ambiguityModeReader =
+    eitherReader $ \raw ->
+        case raw of
+            "fail" -> Right FailOnAmbiguous
+            "first-visible" -> Right FirstVisibleMatch
+            "first" -> Right FirstVisibleMatch
+            _ -> Left "Expected ambiguity mode: fail|first-visible"
+
+renderAmbiguityMode :: AmbiguityMode -> String
+renderAmbiguityMode mode =
+    case mode of
+        FailOnAmbiguous -> "fail"
+        FirstVisibleMatch -> "first-visible"
 
 defaultOutputPath :: FilePath -> FilePath
 defaultOutputPath input =

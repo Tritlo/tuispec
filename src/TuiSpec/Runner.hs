@@ -9,12 +9,14 @@ Most users interact with this module through 'tuiTest' and the action/assertion
 functions ('launch', 'press', 'waitForText', 'expectSnapshot', ...).
 -}
 module TuiSpec.Runner (
+    closeSession,
     currentView,
     dumpView,
     expectNotVisible,
     expectSnapshot,
     expectVisible,
     launch,
+    openSession,
     press,
     pressCombo,
     renderAnsiViewportText,
@@ -23,6 +25,8 @@ module TuiSpec.Runner (
     step,
     tuiTest,
     typeText,
+    killSessionChildrenNow,
+    waitForSelector,
     withTuiSession,
     waitFor,
     waitForText,
@@ -48,8 +52,11 @@ import Data.Time.Clock (NominalDiffTime, UTCTime, diffUTCTime, getCurrentTime)
 import System.Directory (canonicalizePath, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getCurrentDirectory, listDirectory, removePathForcibly)
 import System.Environment (getEnvironment, lookupEnv)
 import System.FilePath (isRelative, makeRelative, takeDirectory, (</>))
+import System.Posix.Process (getProcessGroupIDOf)
 import System.Posix.Pty qualified as Pty
-import System.Process (terminateProcess, waitForProcess)
+import System.Posix.Signals (sigKILL, signalProcess, signalProcessGroup)
+import System.Posix.Types (ProcessGroupID)
+import System.Process (getPid, terminateProcess, waitForProcess)
 import System.Timeout (timeout)
 import Test.Tasty (TestTree)
 import Test.Tasty.HUnit (assertFailure, testCase)
@@ -88,6 +95,12 @@ This is useful for REPL-like exploration workflows where you want to:
 -}
 withTuiSession :: RunOptions -> String -> (Tui -> IO a) -> IO a
 withTuiSession options name body = do
+    tui <- openSession options name
+    body tui `finally` closeSession tui
+
+-- | Open an isolated ad-hoc session TUI handle for interactive orchestration.
+openSession :: RunOptions -> String -> IO Tui
+openSession options name = do
     envOptions <- applyEnvOverrides options
     projectRoot <- resolveProjectRoot
     artifactBase <- resolveArtifactsBaseDir projectRoot (artifactsDir envOptions)
@@ -95,8 +108,19 @@ withTuiSession options name body = do
     let sessionRoot = artifactBase </> "sessions" </> slugify name
     resetDirectory sessionRoot
     createDirectoryIfMissing True sessionRoot
-    tui <- mkTui projectRoot effectiveOptions name sessionRoot sessionRoot 1
-    body tui `finally` teardownTui tui
+    mkTui projectRoot effectiveOptions name sessionRoot sessionRoot 1
+
+-- | Close and teardown a TUI session created with 'openSession'.
+closeSession :: Tui -> IO ()
+closeSession = teardownTui
+
+-- | Kill the active PTY process group with SIGKILL and return immediately.
+killSessionChildrenNow :: Tui -> IO ()
+killSessionChildrenNow tui = do
+    pty <- readPty tui
+    case pty of
+        Just ptyHandle -> killPtyProcessGroupNow ptyHandle
+        Nothing -> pure ()
 
 {- | Build a @tasty@ 'TestTree' from a TUI spec body.
 
@@ -233,6 +257,13 @@ expectNotVisible tui selector =
 waitForText :: Tui -> Selector -> IO ()
 waitForText tui selector = do
     waitFor tui (defaultWaitOptionsFor tui) (selectorMatches selector)
+    viewport <- currentViewport tui
+    assertNotAmbiguous tui selector viewport
+
+-- | Wait for a selector with explicit wait options and ambiguity handling.
+waitForSelector :: Tui -> WaitOptions -> Selector -> IO ()
+waitForSelector tui waitOptions selector = do
+    waitFor tui waitOptions (selectorMatches selector)
     viewport <- currentViewport tui
     assertNotAmbiguous tui selector viewport
 
@@ -478,10 +509,23 @@ teardownTui tui =
 
 terminatePtyHandle :: PtyHandle -> IO ()
 terminatePtyHandle ptyHandle = do
-    ignoreIOError (terminateProcess (ptyProcess ptyHandle))
+    _ <- timeout (500 * 1000) (ignoreIOError (terminateProcess (ptyProcess ptyHandle)))
     _ <- timeout (500 * 1000) (ignoreIOError (void (waitForProcess (ptyProcess ptyHandle))))
     _ <- timeout (500 * 1000) (ignoreIOError (Pty.closePty (ptyMaster ptyHandle)))
     pure ()
+
+killPtyProcessGroupNow :: PtyHandle -> IO ()
+killPtyProcessGroupNow ptyHandle = do
+    maybePid <- getPid (ptyProcess ptyHandle)
+    case maybePid of
+        Nothing -> pure ()
+        Just pid -> do
+            maybeGroup <- try (getProcessGroupIDOf pid) :: IO (Either SomeException ProcessGroupID)
+            case maybeGroup of
+                Right groupId ->
+                    ignoreIOError (signalProcessGroup sigKILL groupId)
+                Left _ ->
+                    ignoreIOError (signalProcess sigKILL pid)
 
 readPty :: Tui -> IO (Maybe PtyHandle)
 readPty tui = readIORef (tuiPty tui)
