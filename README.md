@@ -1,76 +1,98 @@
 # tuispec
 
-`tuispec` is a starter Haskell framework for black-box TUI testing with Playwright-like ergonomics.
+`tuispec` is a Haskell library for Playwright-like black-box testing of terminal UIs over PTY.
 
-Current starter status:
-- shallow DSL for tests
-- sequential runner with retries
-- PTY transport only (no fallback backend)
-- artifact folder scaffolding
-- snapshot baselines (`snapshots/`) with PNG + text comparison
-- PNG rendering via `python3` + Pillow
-- `tuitest` CLI command shape (`run`, `list`)
+Current design:
+- tests are regular compiled Haskell programs (`tasty` + `tuispec`)
+- PTY transport only
+- per-test isolation (fresh PTY process per test)
+- text selectors + keypress/input actions
+- snapshot assertions with text + PNG artifacts
 
 ## Quick start
 
-Build:
+Build the library:
 
 ```bash
 cabal build
 ```
 
-Run the smoke test:
+Run root smoke tests:
 
 ```bash
 cabal test
 ```
 
-Run a test script directly:
+Run the Brick demo integration suite:
 
 ```bash
-cabal run tuitest -- run test/Spec.hs
+cd example
+cabal test
 ```
 
-Run with overrides:
+## Snapshot layout
+
+For a test named `my test` (slug: `my-test`) and `artifactsDir = "artifacts"`:
+
+- Baselines:
+  - `artifacts/snapshots/my-test/<snapshot>.ansi.txt`
+  - `artifacts/snapshots/my-test/<snapshot>.meta.json`
+- Per-run capture:
+  - `artifacts/tests/my-test/snapshots/<snapshot>.ansi.txt`
+  - `artifacts/tests/my-test/snapshots/<snapshot>.meta.json`
+
+Render any ANSI snapshot to PNG:
 
 ```bash
-cabal run tuitest -- run test/Spec.hs --timeout 10 --retries 1 --update-snapshots
+cabal run tuispec -- render artifacts/tests/my-test/snapshots/<snapshot>.ansi.txt
 ```
 
-List tests from a script:
+`render` reads rows/cols from `<snapshot>.meta.json` automatically, with optional overrides via `--rows`, `--cols`, and `--theme` (theme defaults to `auto`).
+
+Render visible plain text from the ANSI stream (terminal-emulated):
 
 ```bash
-cabal run tuitest -- list test/Spec.hs
+cabal run tuispec -- render-text artifacts/tests/my-test/snapshots/<snapshot>.ansi.txt
+```
+
+`render-text` reads rows/cols from `<snapshot>.meta.json` automatically, with optional `--rows` and `--cols` overrides.
+
+## Minimal example
+
+```haskell
+{-# LANGUAGE OverloadedStrings #-}
+
+import Test.Tasty (defaultMain, testGroup)
+import TuiSpec
+
+main :: IO ()
+main =
+  defaultMain $ testGroup "demo"
+    [ tuiTest defaultRunOptions "counter" $ \tui -> do
+        launch tui (App "my-tui" [])
+        waitForText tui (Exact "Ready")
+        press tui (CharKey '+')
+        expectSnapshot tui "counter-updated"
+        press tui (CharKey 'q')
+    ]
 ```
 
 ## Layout
 
 - `src/TuiSpec.hs`: public API
 - `src/TuiSpec/Types.hs`: DSL and configuration types
-- `src/TuiSpec/Runner.hs`: starter runner implementation
-- `app/Main.hs`: `tuitest` CLI entrypoint
-- `test/Spec.hs`: smoke test example
-- `tuispec-v1-spec.md`: project specification
+- `src/TuiSpec/Runner.hs`: PTY runner + assertions + snapshot renderer
+- `test/Spec.hs`: root smoke test
+- `example/app/Main.hs`: Brick demo app
+- `example/test/IntegrationSpec.hs`: integration test suite using `tuispec`
 
-## Brick Example Artifacts
+## Brick example
 
-These images are committed from a real run of `test/BrickDemoSpec.hs`.
-
-- [Brick report (Markdown)](docs/brick-example/report.md)
-- [Brick report (JSON)](docs/brick-example/report.json)
-- [Brick spec](test/BrickDemoSpec.hs)
-- [Brick app](tests/tui/app/Main.hs)
-
-![Brick panes initial](docs/brick-example/01-initial.png)
-![Brick board interaction](docs/brick-example/02-counter-updated.png)
-![Brick split and command mode](docs/brick-example/03-checklist-progress.png)
-![Brick logs screen](docs/brick-example/04-theme-help.png)
-![Brick reset isolation](docs/brick-example/05-reset-isolation.png)
+- [Brick integration spec](example/test/IntegrationSpec.hs)
+- [Brick app](example/app/Main.hs)
 
 ## Notes
 
-- PNG snapshot rendering uses `python3` with Pillow (`PIL`).
-- Snapshot baselines are anchored to the detected project root (or `TUISPEC_PROJECT_ROOT` when set), not the launch directory.
-- If PTY cannot be started in the current environment, tests fail fast.
-- `tuitest run` flags currently map to environment overrides consumed by `runSuite` (timeout, retries, artifacts dir, ambiguity mode).
-- Snapshot palette can be selected with `--snapshot-theme auto|dark|light` (`auto` uses terminal `COLORFGBG` when available).
+- PNG rendering requires `python3` with Pillow (`PIL`).
+- Default viewport is `134x40`.
+- Snapshot theme mode defaults to `auto` (falls back to dark if unknown).

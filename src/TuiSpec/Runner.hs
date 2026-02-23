@@ -8,78 +8,46 @@ module TuiSpec.Runner (
     launch,
     press,
     pressCombo,
-    runSuite,
+    renderAnsiViewportText,
+    serializeAnsiSnapshot,
     step,
-    test,
+    tuiTest,
     typeText,
     waitFor,
     waitForText,
 ) where
 
 import Control.Concurrent (threadDelay)
-import Control.Exception (
-    Exception,
-    SomeException,
-    catch,
-    displayException,
-    finally,
-    throwIO,
-    try,
- )
-import Control.Monad (filterM, forM, unless, when)
+import Control.Exception (Exception, SomeException, catch, displayException, finally, throwIO, toException, try)
+import Control.Monad (unless, void, when)
+import Data.Aeson (encode, object, (.=))
 import Data.ByteString qualified as BS
+import Data.ByteString.Lazy qualified as BL
 import Data.Char (chr, isAlphaNum, ord, toLower)
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import Data.IntMap.Strict qualified as IM
-import Data.List (intercalate, isSuffixOf, sort)
-import Data.Maybe (fromMaybe, listToMaybe)
+import Data.List (intercalate, isSuffixOf, nub, sort)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Text.Encoding.Error qualified as TEE
 import Data.Text.IO qualified as TIO
 import Data.Time.Clock (NominalDiffTime, UTCTime, diffUTCTime, getCurrentTime)
-import Data.Time.Format (defaultTimeLocale, formatTime)
-import System.Directory (
-    canonicalizePath,
-    copyFile,
-    createDirectoryIfMissing,
-    doesDirectoryExist,
-    doesFileExist,
-    getCurrentDirectory,
-    listDirectory,
-    removeFile,
-    removePathForcibly,
- )
+import System.Directory (canonicalizePath, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getCurrentDirectory, listDirectory, removePathForcibly)
 import System.Environment (getEnvironment, lookupEnv)
-import System.Exit (ExitCode (..))
-import System.FilePath (takeDirectory, (</>))
-import System.IO (
-    hClose,
-    openTempFile,
- )
+import System.FilePath (isRelative, makeRelative, takeDirectory, (</>))
 import System.Posix.Pty qualified as Pty
-import System.Process (
-    proc,
-    readCreateProcessWithExitCode,
-    terminateProcess,
- )
+import System.Process (terminateProcess, waitForProcess)
+import System.Timeout (timeout)
+import Test.Tasty (TestTree)
+import Test.Tasty.HUnit (assertFailure, testCase)
 import Text.Read (readMaybe)
 import TuiSpec.Types
 
 data TestStatus
     = Passed
     | Failed Text
-    deriving (Eq, Show)
-
-data TestResult = TestResult
-    { resultName :: String
-    , resultSlug :: String
-    , resultStatus :: TestStatus
-    , resultDurationMs :: Int
-    , resultAttempts :: Int
-    , resultArtifactsPath :: FilePath
-    }
     deriving (Eq, Show)
 
 newtype AssertionError = AssertionError String
@@ -99,35 +67,40 @@ instance Exception StepFailure
 settleDelayMicros :: Int
 settleDelayMicros = 80 * 1000
 
-test :: String -> (Tui -> IO ()) -> Spec
-test = Spec
-
-runSuite :: RunOptions -> [Spec] -> IO ExitCode
-runSuite options specs = do
-    effectiveOptions <- applyEnvOverrides options
-    snapshotsBase <- resolveSnapshotsBaseDir
-    runRoot <- mkRunRoot effectiveOptions
-    results <- forM specs (runOneSpec effectiveOptions snapshotsBase runRoot)
-    writeRunJson runRoot results
-    writeRunMarkdown runRoot results
-    printSummary results
-    if any isFailure results
-        then pure (ExitFailure 1)
-        else pure ExitSuccess
-  where
-    isFailure result = case resultStatus result of
-        Passed -> False
-        Failed _ -> True
+tuiTest :: RunOptions -> String -> (Tui -> IO ()) -> TestTree
+tuiTest options name body =
+    testCase name $ do
+        envOptions <- applyEnvOverrides options
+        projectRoot <- resolveProjectRoot
+        artifactBase <- resolveArtifactsBaseDir projectRoot (artifactsDir envOptions)
+        let effectiveOptions = envOptions{artifactsDir = artifactBase}
+        let slug = slugify name
+        let testRoot = artifactBase </> "tests" </> slug
+        let snapshotRoot = artifactBase </> "snapshots" </> slug
+        (status, finalState, attempts) <-
+            executeWithRetries projectRoot effectiveOptions (Spec name body) testRoot snapshotRoot
+        printTuiTestSummary projectRoot name status attempts testRoot finalState
+        case status of
+            Passed -> pure ()
+            Failed err -> do
+                let snapshotEntries = renderSnapshotEntries finalState
+                let artifactDetails =
+                        if snapshotEntries == "  (none)\n"
+                            then ""
+                            else
+                                "\n\nArtifacts: "
+                                    <> makeRelative projectRoot testRoot
+                                    <> "\nSnapshots:\n"
+                                    <> snapshotEntries
+                assertFailure (T.unpack err <> artifactDetails)
 
 launch :: Tui -> App -> IO ()
 launch tui app = do
     appendAction tui ("launch " <> T.pack (command app))
     currentPty <- readPty tui
     case currentPty of
-        Just ptyHandle -> do
-            ignoreIOError (sendPtyText ptyHandle "exit\n")
-            ignoreIOError (Pty.closePty (ptyMaster ptyHandle))
-            ignoreIOError (terminateProcess (ptyProcess ptyHandle))
+        Just ptyHandle ->
+            terminatePtyHandle ptyHandle
         Nothing -> pure ()
     writePty tui Nothing
     maybePty <- initializePty (terminalRows (tuiOptions tui)) (terminalCols (tuiOptions tui)) app
@@ -191,26 +164,32 @@ typeText tui textValue = do
 
 expectVisible :: Tui -> Selector -> IO ()
 expectVisible tui selector = do
-    waitFor tui defaultWaitOptions (selectorMatches selector)
+    waitFor tui (defaultWaitOptionsFor tui) (selectorMatches selector)
     viewport <- currentViewport tui
     assertNotAmbiguous tui selector viewport
 
 expectNotVisible :: Tui -> Selector -> IO ()
 expectNotVisible tui selector =
-    waitFor tui defaultWaitOptions (not . selectorMatches selector)
+    waitFor tui (defaultWaitOptionsFor tui) (not . selectorMatches selector)
 
 waitForText :: Tui -> Selector -> IO ()
 waitForText tui selector = do
-    waitFor tui defaultWaitOptions (selectorMatches selector)
+    waitFor tui (defaultWaitOptionsFor tui) (selectorMatches selector)
     viewport <- currentViewport tui
     assertNotAmbiguous tui selector viewport
+
+defaultWaitOptionsFor :: Tui -> WaitOptions
+defaultWaitOptionsFor tui =
+    defaultWaitOptions
+        { timeoutMs = timeoutSeconds (tuiOptions tui) * 1000
+        }
 
 waitFor :: Tui -> WaitOptions -> (Viewport -> Bool) -> IO ()
 waitFor tui waitOptions predicate = do
     start <- getCurrentTime
     loop start
   where
-    timeout = fromIntegral (timeoutMs waitOptions) / 1000 :: NominalDiffTime
+    timeoutLimit = fromIntegral (timeoutMs waitOptions) / 1000 :: NominalDiffTime
 
     loop :: UTCTime -> IO ()
     loop startedAt = do
@@ -219,7 +198,7 @@ waitFor tui waitOptions predicate = do
             then pure ()
             else do
                 now <- getCurrentTime
-                if diffUTCTime now startedAt >= timeout
+                if diffUTCTime now startedAt >= timeoutLimit
                     then throwIO (AssertionError "waitFor timed out")
                     else do
                         threadDelay (pollIntervalMs waitOptions * 1000)
@@ -232,7 +211,6 @@ expectSnapshot tui snapshotName = do
     _ <- syncVisibleBuffer tui
     state <- readIORef (tuiStateRef tui)
     let requestedTheme = snapshotTheme (tuiOptions tui)
-        resolvedTheme = resolveSnapshotTheme requestedTheme
     when (not (isKnownSnapshotTheme requestedTheme)) $
         appendWarning
             tui
@@ -242,62 +220,58 @@ expectSnapshot tui snapshotName = do
                 <> T.pack (snapshotThemeName defaultSnapshotTheme)
                 <> "."
             )
-    let emuState =
-            emulateAnsi
-                (emptyEmuState (terminalRows (tuiOptions tui)) (terminalCols (tuiOptions tui)))
-                (T.unpack (rawBuffer state))
-    viewport <- currentViewport tui
+    let actualAnsi = rawBuffer state
+    let rows = terminalRows (tuiOptions tui)
+    let cols = terminalCols (tuiOptions tui)
     let snapshotStem = safeFileStem (T.unpack (unSnapshotName snapshotName))
     let actualDir = tuiTestRoot tui </> "snapshots"
     let baselineDir = tuiSnapshotRoot tui
     createDirectoryIfMissing True actualDir
     createDirectoryIfMissing True baselineDir
 
-    let normalized = normalizeSnapshotText (viewportText viewport)
-    let actualTextPath = actualDir </> (snapshotStem <> "-actual.txt")
-    let actualPngPath = actualDir </> (snapshotStem <> "-actual.png")
-    let baselineTextPath = baselineDir </> (snapshotStem <> ".txt")
-    let baselinePngPath = baselineDir </> (snapshotStem <> ".png")
+    let actualAnsiPath = actualDir </> (snapshotStem <> ".ansi.txt")
+    let baselineAnsiPath = baselineDir </> (snapshotStem <> ".ansi.txt")
+    let actualMetaPath = snapshotMetadataPath actualAnsiPath
+    let baselineMetaPath = snapshotMetadataPath baselineAnsiPath
 
-    TIO.writeFile actualTextPath normalized
-    renderStyledSnapshotPng actualPngPath resolvedTheme emuState
+    TIO.writeFile actualAnsiPath actualAnsi
+    writeSnapshotMetadata actualMetaPath rows cols
+    appendSnapshotArtifact tui actualAnsiPath
 
-    baselineExists <- doesFileExist baselineTextPath
+    baselineExists <- doesFileExist baselineAnsiPath
     if updateSnapshots (tuiOptions tui) || not baselineExists
         then do
-            TIO.writeFile baselineTextPath normalized
-            copyFile actualPngPath baselinePngPath
-            appendSnapshotLog tui ("snapshot " <> T.pack snapshotStem <> " updated")
+            TIO.writeFile baselineAnsiPath actualAnsi
+            writeSnapshotMetadata baselineMetaPath rows cols
+            appendSnapshotArtifact tui baselineAnsiPath
         else do
-            baselineText <- TIO.readFile baselineTextPath
-            let baselineNormalized = normalizeSnapshotText baselineText
-            if baselineNormalized == normalized
-                then appendSnapshotLog tui ("snapshot " <> T.pack snapshotStem <> " matched")
-                else do
-                    let expectedTextPath = actualDir </> (snapshotStem <> "-expected.txt")
-                    let expectedPngPath = actualDir </> (snapshotStem <> "-expected.png")
-                    let diffTextPath = actualDir </> (snapshotStem <> "-diff.txt")
-                    let diffPngPath = actualDir </> (snapshotStem <> "-diff.png")
-                    TIO.writeFile expectedTextPath baselineNormalized
-                    baselinePngExists <- doesFileExist baselinePngPath
-                    if baselinePngExists
-                        then copyFile baselinePngPath expectedPngPath
-                        else renderSnapshotPng expectedPngPath baselineNormalized
-                    writeFile diffTextPath (renderTextDiff baselineNormalized normalized)
-                    renderTextPng diffPngPath (renderDiffSideBySide baselineNormalized normalized)
-                    appendSnapshotLog tui ("snapshot " <> T.pack snapshotStem <> " mismatch")
+            baselineAnsi <- TIO.readFile baselineAnsiPath
+            let baselineCanonical = serializeAnsiSnapshot rows cols requestedTheme baselineAnsi
+            let actualCanonical = serializeAnsiSnapshot rows cols requestedTheme actualAnsi
+            if baselineCanonical == actualCanonical
+                then do
+                    appendSnapshotArtifact tui baselineAnsiPath
+                else
                     throwIO $
                         AssertionError
                             ( "Snapshot mismatch for '"
                                 <> snapshotStem
-                                <> "'. See "
-                                <> expectedPngPath
+                                <> "'. Compare "
+                                <> baselineAnsiPath
                                 <> " and "
-                                <> actualPngPath
-                                <> " (diff: "
-                                <> diffPngPath
-                                <> ")"
+                                <> actualAnsiPath
+                                <> ". Render with: tuispec render "
+                                <> actualAnsiPath
                             )
+
+serializeAnsiSnapshot :: Int -> Int -> String -> Text -> String
+serializeAnsiSnapshot rows cols requestedTheme ansiText =
+    let resolvedTheme = resolveSnapshotTheme requestedTheme
+        emuState =
+            emulateAnsi
+                (emptyEmuState rows cols)
+                (T.unpack ansiText)
+     in serializeSnapshot resolvedTheme emuState
 
 step :: StepOptions -> String -> IO a -> IO a
 step options label action = go 0
@@ -321,37 +295,38 @@ step options label action = go 0
                             , stepCause = displayException err
                             }
 
-runOneSpec :: RunOptions -> FilePath -> FilePath -> Spec -> IO TestResult
-runOneSpec options snapshotsBase runRoot specDef = do
-    start <- getCurrentTime
-    let slug = slugify (specName specDef)
-    let testRoot = runRoot </> "tests" </> slug </> "attempt-final"
-    let snapshotRoot = snapshotsBase </> slug
-    (status, finalState, attempts) <- executeWithRetries options specDef testRoot snapshotRoot
-    end <- getCurrentTime
-    emitTestArtifacts testRoot options finalState status
-    pure
-        TestResult
-            { resultName = specName specDef
-            , resultSlug = slug
-            , resultStatus = status
-            , resultDurationMs = floor (diffUTCTime end start * 1000)
-            , resultAttempts = attempts
-            , resultArtifactsPath = "tests" </> slug </> "attempt-final"
-            }
-
-executeWithRetries :: RunOptions -> Spec -> FilePath -> FilePath -> IO (TestStatus, TuiState, Int)
-executeWithRetries options specDef testRoot snapshotRoot = go 1
+executeWithRetries ::
+    FilePath ->
+    RunOptions ->
+    Spec ->
+    FilePath ->
+    FilePath ->
+    IO (TestStatus, TuiState, Int)
+executeWithRetries projectRoot options specDef testRoot snapshotRoot = go 1
   where
     maxAttempts = max 1 (retries options + 1)
+    hardTimeoutMicros = max 1 (timeoutSeconds options) * 1000 * 1000
 
     go attempt = do
         resetDirectory testRoot
-        tui <- mkTui options (specName specDef) testRoot snapshotRoot attempt
+        tui <- mkTui projectRoot options (specName specDef) testRoot snapshotRoot attempt
         runResultAndState <-
             ( do
-                runResult <- try (specBody specDef tui)
-                _ <- syncVisibleBuffer tui
+                maybeRunResult <- timeout hardTimeoutMicros (try (specBody specDef tui))
+                let runResult =
+                        case maybeRunResult of
+                            Nothing ->
+                                Left
+                                    ( toException
+                                        ( AssertionError
+                                            ( "test timed out after "
+                                                <> show (timeoutSeconds options)
+                                                <> "s"
+                                            )
+                                        )
+                                    )
+                            Just resultValue -> resultValue
+                _ <- timeout (500 * 1000) (syncVisibleBuffer tui)
                 state <- readIORef (tuiStateRef tui)
                 pure (runResult, state)
             )
@@ -363,10 +338,8 @@ executeWithRetries options specDef testRoot snapshotRoot = go 1
                 | attempt < maxAttempts -> go (attempt + 1)
                 | otherwise -> pure (Failed (T.pack (displayException err)), state, attempt)
 
-mkTui :: RunOptions -> String -> FilePath -> FilePath -> Int -> IO Tui
-mkTui options name testRoot snapshotRoot _attempt = do
-    createDirectoryIfMissing True testRoot
-    createDirectoryIfMissing True snapshotRoot
+mkTui :: FilePath -> RunOptions -> String -> FilePath -> FilePath -> Int -> IO Tui
+mkTui projectRoot options name testRoot snapshotRoot _attempt = do
     ptyRef <- newIORef Nothing
     stateRef <-
         newIORef
@@ -384,6 +357,7 @@ mkTui options name testRoot snapshotRoot _attempt = do
             Tui
                 { tuiName = name
                 , tuiOptions = options
+                , tuiRootDir = projectRoot
                 , tuiTestRoot = testRoot
                 , tuiSnapshotRoot = snapshotRoot
                 , tuiPty = ptyRef
@@ -427,12 +401,16 @@ teardownTui tui =
     do
         pty <- readPty tui
         case pty of
-            Just ptyHandle -> do
-                ignoreIOError (sendPtyText ptyHandle "exit\n")
-                ignoreIOError (Pty.closePty (ptyMaster ptyHandle))
-                ignoreIOError (terminateProcess (ptyProcess ptyHandle))
+            Just ptyHandle ->
+                terminatePtyHandle ptyHandle
             _ -> pure ()
         writePty tui Nothing
+
+terminatePtyHandle :: PtyHandle -> IO ()
+terminatePtyHandle ptyHandle = do
+    ignoreIOError (terminateProcess (ptyProcess ptyHandle))
+    _ <- timeout (500 * 1000) (ignoreIOError (void (waitForProcess (ptyProcess ptyHandle))))
+    ignoreIOError (Pty.closePty (ptyMaster ptyHandle))
 
 readPty :: Tui -> IO (Maybe PtyHandle)
 readPty tui = readIORef (tuiPty tui)
@@ -455,22 +433,25 @@ syncVisibleBuffer tui = do
     maybePty <- readPty tui
     case maybePty of
         Just ptyHandle -> do
-            outChunk <- try (drainPtyOutput (ptyMaster ptyHandle)) :: IO (Either SomeException Text)
-            combinedChunk <-
-                case outChunk of
-                    Left outErr -> do
+            maybeChunk <- timeout (250 * 1000) (try (drainPtyOutput (ptyMaster ptyHandle)) :: IO (Either SomeException BS.ByteString))
+            combinedBytes <-
+                case maybeChunk of
+                    Nothing -> do
+                        appendWarning tui "pty read timed out during viewport sync"
+                        pure BS.empty
+                    Just (Left outErr) -> do
                         appendWarning tui ("failed to read pty output: " <> T.pack (displayException outErr))
-                        pure ""
-                    Right outText ->
-                        pure outText
-            case combinedChunk of
-                "" ->
-                    visibleBuffer <$> readIORef (tuiStateRef tui)
-                textChunk -> do
+                        pure BS.empty
+                    Just (Right outBytes) ->
+                        pure outBytes
+            if BS.null combinedBytes
+                then visibleBuffer <$> readIORef (tuiStateRef tui)
+                else do
+                    let textChunk = TE.decodeUtf8With TEE.lenientDecode combinedBytes
                     state <- readIORef (tuiStateRef tui)
                     let nextRaw = rawBuffer state <> textChunk
                     let nextVisible =
-                            viewportFromAnsiRaw
+                            renderAnsiViewportText
                                 (terminalRows (tuiOptions tui))
                                 (terminalCols (tuiOptions tui))
                                 nextRaw
@@ -488,10 +469,13 @@ appendAction tui actionText =
     modifyState tui $ \state ->
         state{actionLog = actionLog state <> [actionText]}
 
-appendSnapshotLog :: Tui -> Text -> IO ()
-appendSnapshotLog tui snapshotText =
+appendSnapshotArtifact :: Tui -> FilePath -> IO ()
+appendSnapshotArtifact tui snapshotPath = do
+    let relativePath = T.pack (makeRelative (tuiRootDir tui) snapshotPath)
     modifyState tui $ \state ->
-        state{snapshotLog = snapshotLog state <> [snapshotText]}
+        if relativePath `elem` snapshotLog state
+            then state
+            else state{snapshotLog = snapshotLog state <> [relativePath]}
 
 appendWarning :: Tui -> Text -> IO ()
 appendWarning tui warningText =
@@ -582,17 +566,30 @@ sendPtyText :: PtyHandle -> Text -> IO ()
 sendPtyText ptyHandle textValue =
     Pty.writePty (ptyMaster ptyHandle) (TE.encodeUtf8 textValue)
 
-drainPtyOutput :: Pty.Pty -> IO Text
-drainPtyOutput pty = T.concat . reverse <$> go []
+drainPtyOutput :: Pty.Pty -> IO BS.ByteString
+drainPtyOutput pty = BS.concat . reverse <$> go 0 []
   where
-    go acc = do
-        next <- Pty.tryReadPty pty
-        case next of
-            Right chunk
-                | not (BS.null chunk) ->
-                    go (TE.decodeUtf8With TEE.lenientDecode chunk : acc)
-            _ ->
-                pure acc
+    -- Keep each sync bounded so a constantly-redrawing TUI cannot stall the runner.
+    maxDrainChunks :: Int
+    maxDrainChunks = 256
+
+    waitChunkMicros :: Int
+    waitChunkMicros = 15 * 1000
+
+    go chunkCount acc
+        | chunkCount >= maxDrainChunks = pure acc
+        | otherwise = do
+            ready <- timeout waitChunkMicros (Pty.threadWaitReadPty pty)
+            case ready of
+                Nothing -> pure acc
+                Just () -> do
+                    next <- Pty.tryReadPty pty
+                    case next of
+                        Right chunk
+                            | not (BS.null chunk) ->
+                                go (chunkCount + 1) (chunk : acc)
+                        _ ->
+                            pure acc
 
 data EmuColor = EmuColor Int Int Int
 
@@ -740,8 +737,8 @@ themePalette PtyDefaultLight =
             ]
         }
 
-viewportFromAnsiRaw :: Int -> Int -> Text -> Text
-viewportFromAnsiRaw rows cols rawText =
+renderAnsiViewportText :: Int -> Int -> Text -> Text
+renderAnsiViewportText rows cols rawText =
     renderEmuState (emulateAnsi (emptyEmuState rows cols) (T.unpack rawText))
 
 snapshotStyledRows :: SnapshotTheme -> EmuState -> [SnapshotStyledRow]
@@ -1302,348 +1299,46 @@ safeTextIndex indexValue textValue
     | indexValue >= T.length textValue = Nothing
     | otherwise = Just (T.index textValue indexValue)
 
-normalizeSnapshotText :: Text -> Text
-normalizeSnapshotText =
-    T.intercalate "\n"
-        . reverse
-        . dropWhile T.null
-        . reverse
-        . map normalizeLine
-        . T.lines
-        . T.replace "\r" ""
-  where
-    normalizeLine = T.dropWhileEnd (\c -> c == ' ' || c == '\t')
+resolveArtifactsBaseDir :: FilePath -> FilePath -> IO FilePath
+resolveArtifactsBaseDir projectRoot value =
+    if isRelative value
+        then canonicalizePath (projectRoot </> value)
+        else canonicalizePath value
 
-renderDiffSideBySide :: Text -> Text -> Text
-renderDiffSideBySide expected actual =
-    T.unlines
-        [ "=== EXPECTED ==="
-        , expected
-        , ""
-        , "=== ACTUAL ==="
-        , actual
-        ]
+printTuiTestSummary ::
+    FilePath ->
+    String ->
+    TestStatus ->
+    Int ->
+    FilePath ->
+    TuiState ->
+    IO ()
+printTuiTestSummary projectRoot name status attempts testRoot state = do
+    let snapshotPaths = sort (nub (map T.unpack (snapshotLog state)))
+    let statusLabel =
+            case status of
+                Passed -> "PASS"
+                Failed _ -> "FAIL"
+    putStrLn
+        ( "[tuispec] "
+            <> statusLabel
+            <> " "
+            <> name
+            <> " (attempts="
+            <> show attempts
+            <> ")"
+        )
+    unless (null snapshotPaths) $
+        do
+            putStrLn ("[tuispec] artifacts: " <> makeRelative projectRoot testRoot)
+            putStrLn ("[tuispec] snapshots:\n" <> renderSnapshotEntries state)
 
-renderSnapshotPng :: FilePath -> Text -> IO ()
-renderSnapshotPng = renderTextPng
-
-renderStyledSnapshotPng :: FilePath -> SnapshotTheme -> EmuState -> IO ()
-renderStyledSnapshotPng outPath theme emuState = do
-    maybeFontPath <- resolveFontPath
-    let fontArg = fromMaybe "" maybeFontPath
-    createDirectoryIfMissing True (takeDirectory outPath)
-    (tmpInPath, tmpHandle) <- openTempFile (takeDirectory outPath) "snapshot-styled-"
-    TIO.hPutStr tmpHandle (T.pack (serializeSnapshot theme emuState))
-    hClose tmpHandle
-    let args =
-            ["-c", pythonStyledRenderScript, tmpInPath, outPath, fontArg]
-    result <- readCreateProcessWithExitCode (proc "python3" args) ""
-    ignoreIOError (removeFile tmpInPath)
-    case result of
-        (ExitSuccess, _, _) -> pure ()
-        (_, _, stderrText) ->
-            throwIO $
-                AssertionError
-                    ( "Failed to render styled PNG (python3 + Pillow required in PATH). "
-                        <> stderrText
-                    )
-
-renderTextDiff :: Text -> Text -> String
-renderTextDiff expected actual =
-    unlines $
-        ["--- expected", "+++ actual"]
-            <> go 1 (T.lines expected) (T.lines actual)
-  where
-    go :: Int -> [Text] -> [Text] -> [String]
-    go _ [] [] = []
-    go lineNo (e : es) [] =
-        ("@@ line " <> show lineNo <> " @@")
-            : ("- " <> T.unpack e)
-            : ("+ ")
-            : go (lineNo + 1) es []
-    go lineNo [] (a : as) =
-        ("@@ line " <> show lineNo <> " @@")
-            : ("- ")
-            : ("+ " <> T.unpack a)
-            : go (lineNo + 1) [] as
-    go lineNo (e : es) (a : as)
-        | e == a = go (lineNo + 1) es as
-        | otherwise =
-            ("@@ line " <> show lineNo <> " @@")
-                : ("- " <> T.unpack e)
-                : ("+ " <> T.unpack a)
-                : go (lineNo + 1) es as
-
-renderTextPng :: FilePath -> Text -> IO ()
-renderTextPng outPath textValue = do
-    maybeFontPath <- resolveFontPath
-    let fontArg = fromMaybe "" maybeFontPath
-    createDirectoryIfMissing True (takeDirectory outPath)
-    (tmpInPath, tmpHandle) <- openTempFile (takeDirectory outPath) "snapshot-"
-    TIO.hPutStr tmpHandle textValue
-    hClose tmpHandle
-    let args =
-            ["-c", pythonRenderScript, tmpInPath, outPath, fontArg]
-    result <- readCreateProcessWithExitCode (proc "python3" args) ""
-    ignoreIOError (removeFile tmpInPath)
-    case result of
-        (ExitSuccess, _, _) -> pure ()
-        (_, _, stderrText) ->
-            throwIO $
-                AssertionError
-                    ( "Failed to render PNG (python3 + Pillow required in PATH). "
-                        <> stderrText
-                    )
-
-pythonRenderScript :: String
-pythonRenderScript =
-    unlines
-        [ "import sys"
-        , "from PIL import Image, ImageDraw, ImageFont"
-        , "inp, out = sys.argv[1], sys.argv[2]"
-        , "font_path = sys.argv[3] if len(sys.argv) > 3 else ''"
-        , "font_candidates = []"
-        , "if font_path:"
-        , "    font_candidates.append(font_path)"
-        , "font_candidates += ["
-        , "    './fonts/IosevkaMono-Regular.ttc',"
-        , "    './fonts/Iosevka-Regular.ttc',"
-        , "    './fonts/IosevkaMono-Regular.ttf',"
-        , "    './fonts/Iosevka-Regular.ttf',"
-        , "    '/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf',"
-        , "    '/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf'"
-        , " ]"
-        , "font = None"
-        , "for candidate in font_candidates:"
-        , "    if not candidate:"
-        , "        continue"
-        , "    try:"
-        , "        font = ImageFont.truetype(candidate, 14)"
-        , "        break"
-        , "    except OSError:"
-        , "        continue"
-        , "if font is None:"
-        , "    font = ImageFont.load_default()"
-        , "with open(inp, 'r', encoding='utf-8', errors='replace') as f:"
-        , "    lines = f.read().splitlines()"
-        , "probe = font.getbbox('Hg')"
-        , "line_h = (probe[3] - probe[1]) + 4"
-        , "max_w = 0"
-        , "for line in lines:"
-        , "    max_w = max(max_w, font.getbbox(line)[2])"
-        , "width = max(160, max_w + 20)"
-        , "height = max(40, max(1, len(lines)) * line_h + 20)"
-        , "img = Image.new('RGB', (width, height), 'white')"
-        , "draw = ImageDraw.Draw(img)"
-        , "y = 10"
-        , "for line in lines:"
-        , "    draw.text((10, y), line, fill='black', font=font)"
-        , "    y += line_h"
-        , "img.save(out, 'PNG')"
-        ]
-
-pythonStyledRenderScript :: String
-pythonStyledRenderScript =
-    unlines
-        [ "import json"
-        , "import sys"
-        , "from PIL import Image, ImageDraw, ImageFont"
-        , "inp, out = sys.argv[1], sys.argv[2]"
-        , "font_path = sys.argv[3] if len(sys.argv) > 3 else ''"
-        , "font_candidates = []"
-        , "if font_path:"
-        , "    font_candidates.append(font_path)"
-        , "font_candidates += ["
-        , "    './fonts/IosevkaMono-Regular.ttc',"
-        , "    './fonts/Iosevka-Regular.ttc',"
-        , "    './fonts/IosevkaMono-Regular.ttf',"
-        , "    './fonts/Iosevka-Regular.ttf',"
-        , "    '/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf',"
-        , "    '/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf'"
-        , " ]"
-        , "font = None"
-        , "for candidate in font_candidates:"
-        , "    if not candidate:"
-        , "        continue"
-        , "    try:"
-        , "        font = ImageFont.truetype(candidate, 12)"
-        , "        break"
-        , "    except OSError:"
-        , "        continue"
-        , "if font is None:"
-        , "    font = ImageFont.load_default()"
-        , "with open(inp, 'r', encoding='utf-8', errors='replace') as f:"
-        , "    payload = json.load(f)"
-        , "rows = payload['rows']"
-        , "cols = payload['cols']"
-        , "cells = payload['cells']"
-        , "default_bg = tuple(payload.get('defaultBg', (13, 17, 23)))"
-        , "probe = font.getbbox('Hg')"
-        , "line_h = max(1, (probe[3] - probe[1]) + 2)"
-        , "cell_w = max(1, (font.getbbox('W')[2] - font.getbbox('W')[0]))"
-        , "padding_x = 1"
-        , "padding_y = 1"
-        , "width = max(1, cols * cell_w + (padding_x * 2))"
-        , "height = max(1, rows * line_h + (padding_y * 2))"
-        , "img = Image.new('RGB', (width, height), default_bg)"
-        , "draw = ImageDraw.Draw(img)"
-        , "y = padding_y"
-        , "for row_idx in range(rows):"
-        , "    x = padding_x"
-        , "    row = cells[row_idx] if row_idx < len(cells) else []"
-        , "    for col_idx in range(cols):"
-        , "        cell = row[col_idx] if col_idx < len(row) else [32, payload.get('defaultFg', [229, 229, 229]), list(default_bg)]"
-        , "        if len(cell) != 3:"
-        , "            continue"
-        , "        ch = chr(cell[0])"
-        , "        fg = tuple(cell[1])"
-        , "        bg = tuple(cell[2])"
-        , "        rect = (x, y, x + cell_w, y + line_h)"
-        , "        draw.rectangle(rect, fill=bg)"
-        , "        draw.text((x, y), ch, fill=fg, font=font)"
-        , "        x += cell_w"
-        , "    y += line_h"
-        , "img.save(out, 'PNG')"
-        ]
-
-emitTestArtifacts :: FilePath -> RunOptions -> TuiState -> TestStatus -> IO ()
-emitTestArtifacts testRoot _options state status = do
-    createDirectoryIfMissing True testRoot
-    TIO.writeFile (testRoot </> "viewport.txt") (visibleBuffer state)
-    writeFile (testRoot </> "steps.json") (renderStepsJson state status)
-    unless (launchedApp state == Nothing) $
-        writeFile (testRoot </> "launch.txt") (show (launchedApp state))
-
-renderStepsJson :: TuiState -> TestStatus -> String
-renderStepsJson state status =
-    "{\n"
-        <> "  \"status\": "
-        <> quoted (statusText status)
-        <> ",\n"
-        <> "  \"steps\": [\n"
-        <> intercalate ",\n" (map renderItem (zip [1 :: Int ..] (actionLog state)))
-        <> "\n  ],\n"
-        <> "  \"snapshots\": [\n"
-        <> intercalate ",\n" (map renderTextItem (snapshotLog state))
-        <> "\n  ],\n"
-        <> "  \"warnings\": [\n"
-        <> intercalate ",\n" (map renderTextItem (runtimeWarnings state))
-        <> "\n  ]\n"
-        <> "}\n"
-  where
-    renderItem (idx, actionText) =
-        "    {\"id\": "
-            <> show idx
-            <> ", \"action\": "
-            <> quoted (T.unpack actionText)
-            <> "}"
-
-    renderTextItem value = "    " <> quoted (T.unpack value)
-
-    statusText Passed = "passed"
-    statusText (Failed _) = "failed"
-
-writeRunJson :: FilePath -> [TestResult] -> IO ()
-writeRunJson runRoot results =
-    writeFile (runRoot </> "report.json") $
-        "{\n"
-            <> "  \"tests\": [\n"
-            <> intercalate ",\n" (map renderResult results)
-            <> "\n  ]\n"
-            <> "}\n"
-  where
-    renderResult result =
-        "    {"
-            <> "\"name\": "
-            <> quoted (resultName result)
-            <> ", \"slug\": "
-            <> quoted (resultSlug result)
-            <> ", \"status\": "
-            <> quoted (statusText (resultStatus result))
-            <> ", \"durationMs\": "
-            <> show (resultDurationMs result)
-            <> ", \"attempts\": "
-            <> show (resultAttempts result)
-            <> ", \"artifacts\": "
-            <> quoted (resultArtifactsPath result)
-            <> maybeErrorField (resultStatus result)
-            <> "}"
-
-    maybeErrorField Passed = ""
-    maybeErrorField (Failed err) = ", \"error\": " <> quoted (T.unpack err)
-
-    statusText Passed = "passed"
-    statusText (Failed _) = "failed"
-
-writeRunMarkdown :: FilePath -> [TestResult] -> IO ()
-writeRunMarkdown runRoot results = do
-    rows <- forM results (row runRoot)
-    writeFile (runRoot </> "report.md") $
-        "# tuispec run report\n\n"
-            <> "| Test | Status | Attempts | Duration (ms) | Artifacts |\n"
-            <> "|---|---|---:|---:|---|\n"
-            <> concat rows
-  where
-    row root result = do
-        links <- artifactLinks root (resultArtifactsPath result)
-        pure $
-            "| "
-                <> resultName result
-                <> " | "
-                <> statusText (resultStatus result)
-                <> " | "
-                <> show (resultAttempts result)
-                <> " | "
-                <> show (resultDurationMs result)
-                <> " | "
-                <> links
-                <> " |\n"
-
-    artifactLinks root testArtifactPath = do
-        snapshotNames <- listSnapshotEntries (root </> testArtifactPath </> "snapshots")
-        let baseLinks =
-                [ "[viewport](" <> testArtifactPath <> "/viewport.txt)"
-                , "[steps](" <> testArtifactPath <> "/steps.json)"
-                , "[snapshots](" <> testArtifactPath <> "/snapshots)"
-                ]
-        let snapshotLinks =
-                [ "[" <> fileName <> "](" <> testArtifactPath <> "/snapshots/" <> fileName <> ")"
-                | fileName <- snapshotNames
-                ]
-        pure (intercalate ", " (baseLinks <> snapshotLinks))
-
-    statusText Passed = "passed"
-    statusText (Failed _) = "failed"
-
-printSummary :: [TestResult] -> IO ()
-printSummary results = do
-    let failed = filter isFailure results
-    putStrLn ("Ran " <> show (length results) <> " test(s).")
-    if null failed
-        then putStrLn "All tests passed."
-        else do
-            putStrLn (show (length failed) <> " test(s) failed:")
-            mapM_ printFailure failed
-  where
-    isFailure result = case resultStatus result of
-        Passed -> False
-        Failed _ -> True
-
-    printFailure result =
-        case resultStatus result of
-            Passed -> pure ()
-            Failed err ->
-                putStrLn
-                    ( "  - "
-                        <> resultName result
-                        <> ": "
-                        <> T.unpack err
-                    )
-
-resolveSnapshotsBaseDir :: IO FilePath
-resolveSnapshotsBaseDir = do
-    projectRoot <- resolveProjectRoot
-    canonicalizePath (projectRoot </> "snapshots")
+renderSnapshotEntries :: TuiState -> String
+renderSnapshotEntries state =
+    case nub (map T.unpack (snapshotLog state)) of
+        [] -> "  (none)\n"
+        paths ->
+            concatMap (\path -> "  - " <> path <> "\n") (sort paths)
 
 resolveProjectRoot :: IO FilePath
 resolveProjectRoot = do
@@ -1653,20 +1348,6 @@ resolveProjectRoot = do
         Nothing -> do
             cwd <- getCurrentDirectory
             locateProjectRoot cwd
-
-resolveFontPath :: IO (Maybe FilePath)
-resolveFontPath = do
-    projectRoot <- resolveProjectRoot
-    envFont <- lookupEnv "TUISPEC_FONT_PATH"
-    let candidateFonts =
-            maybe [] (\p -> [p, projectRoot </> p]) envFont
-                <> [ projectRoot </> "fonts" </> "IosevkaMono-Regular.ttc"
-                   , projectRoot </> "fonts" </> "Iosevka-Regular.ttc"
-                   , projectRoot </> "fonts" </> "IosevkaMono-Regular.ttf"
-                   , projectRoot </> "fonts" </> "Iosevka-Regular.ttf"
-                   ]
-    existing <- filterM doesFileExist candidateFonts
-    pure (listToMaybe existing)
 
 locateProjectRoot :: FilePath -> IO FilePath
 locateProjectRoot startDir = do
@@ -1691,20 +1372,10 @@ hasProjectMarker dir = do
     let hasCabalFile = any (".cabal" `isSuffixOf`) entries
     pure (hasGit || hasCabalProject || hasCabalFile)
 
-mkRunRoot :: RunOptions -> IO FilePath
-mkRunRoot options = do
-    createDirectoryIfMissing True (artifactsDir options)
-    now <- getCurrentTime
-    let stamp = formatTime defaultTimeLocale "%Y-%m-%dT%H-%M-%SZ" now
-    let runRoot = artifactsDir options </> ("run-" <> stamp)
-    createDirectoryIfMissing True runRoot
-    pure runRoot
-
 resetDirectory :: FilePath -> IO ()
 resetDirectory dir = do
     exists <- doesDirectoryExist dir
     when exists (removePathForcibly dir)
-    createDirectoryIfMissing True dir
 
 safeFileStem :: String -> String
 safeFileStem input =
@@ -1727,17 +1398,23 @@ safeFileStem input =
 slugify :: String -> String
 slugify = safeFileStem
 
-listSnapshotEntries :: FilePath -> IO [FilePath]
-listSnapshotEntries snapshotDir = do
-    exists <- doesDirectoryExist snapshotDir
-    if not exists
-        then pure []
-        else do
-            entries <- listDirectory snapshotDir
-            pure (sort (filter isSnapshotArtifact entries))
-  where
-    isSnapshotArtifact fileName =
-        ".png" `isSuffixOf` fileName || ".txt" `isSuffixOf` fileName
+snapshotMetadataPath :: FilePath -> FilePath
+snapshotMetadataPath ansiPath =
+    if ".ansi.txt" `isSuffixOf` ansiPath
+        then take (length ansiPath - length (".ansi.txt" :: String)) ansiPath <> ".meta.json"
+        else ansiPath <> ".meta.json"
+
+writeSnapshotMetadata :: FilePath -> Int -> Int -> IO ()
+writeSnapshotMetadata metaPath rows cols =
+    BL.writeFile
+        metaPath
+        ( encode
+            ( object
+                [ "rows" .= rows
+                , "cols" .= cols
+                ]
+            )
+        )
 
 applyEnvOverrides :: RunOptions -> IO RunOptions
 applyEnvOverrides options = do
@@ -1835,13 +1512,3 @@ detectTerminalBackground colorFgBgValue =
 ignoreIOError :: IO () -> IO ()
 ignoreIOError action =
     action `catch` \(_ :: SomeException) -> pure ()
-
-quoted :: String -> String
-quoted value = "\"" <> concatMap escape value <> "\""
-  where
-    escape '"' = "\\\""
-    escape '\\' = "\\\\"
-    escape '\n' = "\\n"
-    escape '\r' = "\\r"
-    escape '\t' = "\\t"
-    escape c = [c]

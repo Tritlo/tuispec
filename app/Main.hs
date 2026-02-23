@@ -1,163 +1,158 @@
 module Main where
 
-import Control.Exception (SomeException, displayException, try)
-import Data.List (isPrefixOf, isSuffixOf)
-import System.Directory (
-    canonicalizePath,
-    doesDirectoryExist,
-    doesFileExist,
-    listDirectory,
- )
-import System.Environment (getArgs, setEnv)
-import System.Exit (ExitCode (..), exitFailure, exitWith)
-import System.FilePath (takeDirectory, (</>))
-import System.Process (callProcess)
+import Data.List (isSuffixOf)
+import Options.Applicative
+import Text.Read (readMaybe)
+import TuiSpec.Render (renderAnsiSnapshotFile, renderAnsiSnapshotTextFile)
 
 data Command
-    = Run FilePath [String] [(String, String)]
-    | ListTests FilePath
-    | Help
-    deriving (Eq, Show)
+    = Render RenderOptions
+    | RenderText RenderTextOptions
+
+data RenderOptions = RenderOptions
+    { inputPath :: FilePath
+    , outputPath :: Maybe FilePath
+    , themeName :: Maybe String
+    , cols :: Maybe Int
+    , rows :: Maybe Int
+    }
+
+data RenderTextOptions = RenderTextOptions
+    { textInputPath :: FilePath
+    , textOutputPath :: Maybe FilePath
+    , textCols :: Maybe Int
+    , textRows :: Maybe Int
+    }
 
 main :: IO ()
 main = do
-    args <- getArgs
-    case parseCommand args of
-        Left err -> do
-            putStrLn err
-            putStrLn usage
-            exitFailure
-        Right Help -> putStrLn usage
-        Right (ListTests path) -> do
-            listResult <- try (readFile path) :: IO (Either SomeException String)
-            case listResult of
-                Left err -> do
-                    putStrLn ("Failed to read " <> path <> ": " <> displayException err)
-                    exitWith (ExitFailure 2)
-                Right content -> do
-                    let names = extractTestNames (lines content)
-                    mapM_ putStrLn names
-        Right (Run path passthrough envOverrides) -> do
-            mapM_ (uncurry setEnv) envOverrides
-            rootResult <- try (setProjectRootFromSpec path) :: IO (Either SomeException ())
-            case rootResult of
-                Left _ -> pure ()
-                Right () -> pure ()
-            runResult <-
-                try (callProcess "cabal" (["exec", "runghc", "--", "-isrc", path] <> passthrough)) ::
-                    IO (Either SomeException ())
-            case runResult of
-                Left err -> do
-                    putStrLn ("tuitest run failed (via cabal exec runghc): " <> displayException err)
-                    exitWith (ExitFailure 2)
-                Right () -> pure ()
+    parsedCommand <- execParser commandParserInfo
+    runCommand parsedCommand
 
-parseCommand :: [String] -> Either String Command
-parseCommand args =
-    case args of
-        [] -> Right Help
-        ["--help"] -> Right Help
-        ["help"] -> Right Help
-        "list" : path : _ -> Right (ListTests path)
-        "run" : path : rest ->
-            let (envOverrides, passthrough) = parseRunFlags rest
-             in Right (Run path passthrough envOverrides)
-        _ -> Left "Unknown command."
+runCommand :: Command -> IO ()
+runCommand parsedCommand =
+    case parsedCommand of
+        Render options -> do
+            let outPath = maybe (defaultOutputPath (inputPath options)) id (outputPath options)
+            renderAnsiSnapshotFile (rows options) (cols options) (themeName options) (inputPath options) outPath
+            putStrLn ("Rendered " <> outPath)
+        RenderText options -> do
+            let outPath = maybe (defaultTextOutputPath (textInputPath options)) id (textOutputPath options)
+            renderAnsiSnapshotTextFile (textRows options) (textCols options) (textInputPath options) outPath
+            putStrLn ("Rendered " <> outPath)
 
-parseRunFlags :: [String] -> ([(String, String)], [String])
-parseRunFlags = go [] []
-  where
-    go envAcc passAcc args =
-        case args of
-            [] -> (reverse envAcc, reverse passAcc)
-            "--timeout" : value : rest ->
-                go (("TUISPEC_TIMEOUT_SECONDS", value) : envAcc) passAcc rest
-            "--retries" : value : rest ->
-                go (("TUISPEC_RETRIES", value) : envAcc) passAcc rest
-            "--step-retries" : value : rest ->
-                go (("TUISPEC_STEP_RETRIES", value) : envAcc) passAcc rest
-            "--artifacts-dir" : value : rest ->
-                go (("TUISPEC_ARTIFACTS_DIR", value) : envAcc) passAcc rest
-            "--update-snapshots" : rest ->
-                go (("TUISPEC_UPDATE_SNAPSHOTS", "true") : envAcc) passAcc rest
-            "--snapshot-theme" : value : rest ->
-                go (("TUISPEC_SNAPSHOT_THEME", value) : envAcc) passAcc rest
-            "--first-match" : rest ->
-                go (("TUISPEC_AMBIGUITY_MODE", "first") : envAcc) passAcc rest
-            "--fail-on-ambiguous" : rest ->
-                go (("TUISPEC_AMBIGUITY_MODE", "fail") : envAcc) passAcc rest
-            value : rest
-                | "--" `isPrefixOf` value ->
-                    go envAcc (value : passAcc) rest
-                | otherwise ->
-                    go envAcc (value : passAcc) rest
+commandParserInfo :: ParserInfo Command
+commandParserInfo =
+    info
+        (parseCommand <**> helper)
+        ( fullDesc
+            <> progDesc "Render ANSI snapshot artifacts to PNG"
+            <> header "tuispec"
+        )
 
-extractTestNames :: [String] -> [String]
-extractTestNames = foldr extract []
-  where
-    extract line acc =
-        case breakOnTest line of
-            Nothing -> acc
-            Just testName -> testName : acc
+parseCommand :: Parser Command
+parseCommand =
+    hsubparser
+        ( command
+            "render"
+            ( info
+                (Render <$> parseRenderOptions)
+                (progDesc "Render a .ansi.txt snapshot file")
+            )
+            <> command
+                "render-text"
+                ( info
+                    (RenderText <$> parseRenderTextOptions)
+                    (progDesc "Render visible plain text from a .ansi.txt snapshot file using terminal emulation")
+                )
+        )
 
-    breakOnTest line =
-        let marker = "test \""
-         in case dropUntil marker line of
-                Nothing -> Nothing
-                Just remaining -> Just (takeWhile (/= '"') remaining)
+parseRenderOptions :: Parser RenderOptions
+parseRenderOptions =
+    RenderOptions
+        <$> argument
+            str
+            ( metavar "SNAPSHOT_ANSI_TXT"
+                <> help "Path to snapshot ANSI file"
+            )
+        <*> optional
+            ( strOption
+                ( long "out"
+                    <> metavar "OUTPUT_PNG"
+                    <> help "Output PNG path"
+                )
+            )
+        <*> optional
+            ( strOption
+                ( long "theme"
+                    <> metavar "THEME"
+                    <> help "Theme override: auto|dark|light (default: metadata, then auto)"
+                )
+            )
+        <*> optional
+            ( option
+                positiveIntReader
+                ( long "cols"
+                    <> metavar "N"
+                    <> help "Viewport columns override (default: metadata, then 134)"
+                )
+            )
+        <*> optional
+            ( option
+                positiveIntReader
+                ( long "rows"
+                    <> metavar "N"
+                    <> help "Viewport rows override (default: metadata, then 40)"
+                )
+            )
 
-dropUntil :: String -> String -> Maybe String
-dropUntil needle haystack =
-    case haystack of
-        [] -> Nothing
-        _ | needle `isPrefixOf` haystack -> Just (drop (length needle) haystack)
-        _ : rest -> dropUntil needle rest
+parseRenderTextOptions :: Parser RenderTextOptions
+parseRenderTextOptions =
+    RenderTextOptions
+        <$> argument
+            str
+            ( metavar "SNAPSHOT_ANSI_TXT"
+                <> help "Path to snapshot ANSI file"
+            )
+        <*> optional
+            ( strOption
+                ( long "out"
+                    <> metavar "OUTPUT_TXT"
+                    <> help "Output plain text path"
+                )
+            )
+        <*> optional
+            ( option
+                positiveIntReader
+                ( long "cols"
+                    <> metavar "N"
+                    <> help "Viewport columns override (default: metadata, then 134)"
+                )
+            )
+        <*> optional
+            ( option
+                positiveIntReader
+                ( long "rows"
+                    <> metavar "N"
+                    <> help "Viewport rows override (default: metadata, then 40)"
+                )
+            )
 
-setProjectRootFromSpec :: FilePath -> IO ()
-setProjectRootFromSpec specPath = do
-    specAbsolutePath <- canonicalizePath specPath
-    root <- findProjectRoot (takeDirectory specAbsolutePath)
-    setEnv "TUISPEC_PROJECT_ROOT" root
+positiveIntReader :: ReadM Int
+positiveIntReader =
+    eitherReader $ \raw ->
+        case readMaybe raw :: Maybe Int of
+            Just parsed | parsed > 0 -> Right parsed
+            _ -> Left "Expected a positive integer"
 
-findProjectRoot :: FilePath -> IO FilePath
-findProjectRoot startDir = do
-    absoluteStart <- canonicalizePath startDir
-    go absoluteStart absoluteStart
-  where
-    go startRoot dir = do
-        rootFound <- isProjectRoot dir
-        if rootFound
-            then pure dir
-            else do
-                let parent = takeDirectory dir
-                if parent == dir
-                    then pure startRoot
-                    else go startRoot parent
+defaultOutputPath :: FilePath -> FilePath
+defaultOutputPath input =
+    if ".ansi.txt" `isSuffixOf` input
+        then take (length input - length (".ansi.txt" :: String)) input <> ".png"
+        else input <> ".png"
 
-isProjectRoot :: FilePath -> IO Bool
-isProjectRoot dir = do
-    hasGit <- doesDirectoryExist (dir </> ".git")
-    hasCabalProject <- doesFileExist (dir </> "cabal.project")
-    entries <- listDirectory dir
-    let hasCabalFile = any (".cabal" `isSuffixOf`) entries
-    pure (hasGit || hasCabalProject || hasCabalFile)
-
-usage :: String
-usage =
-    unlines
-        [ "tuitest - starter CLI"
-        , ""
-        , "Usage:"
-        , "  tuitest run <Spec.hs> [flags]"
-        , "  tuitest list <Spec.hs>"
-        , ""
-        , "Supported flags:"
-        , "  --timeout <seconds>"
-        , "  --retries <n>"
-        , "  --step-retries <n>"
-        , "  --update-snapshots"
-        , "  --snapshot-theme <auto|dark|light>"
-        , "  --artifacts-dir <path>"
-        , "  --first-match"
-        , "  --fail-on-ambiguous"
-        ]
+defaultTextOutputPath :: FilePath -> FilePath
+defaultTextOutputPath input =
+    if ".ansi.txt" `isSuffixOf` input
+        then take (length input - length (".ansi.txt" :: String)) input <> ".txt"
+        else input <> ".txt"
