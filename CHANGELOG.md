@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.0.0 — 2026-02-24
+
+* Record viewport frames in JSONL sessions and replay them on the terminal with `tuispec replay`, using delta compression for efficient frame storage.
+* Add interactive replay controls: Space to pause/resume, Left/Right to step frames, Up/Down to skip 5 frames, q to quit.
+* Add `--show-input` replay flag to display the last input action on a status line below the viewport.
+* Add `--version` flag to the CLI.
+* Include tuispec version in `initialize` response and snapshot `meta.json`.
+* Fix theme-aware color rendering for light/dark PNG snapshots.
+* Use alternate screen buffer for replay to avoid polluting terminal scrollback.
+
 ## 0.2.0.0 — 2026-02-23
 
 * Introduce server v2 APIs including launch `cwd`/nullable `env`, per-call ambiguity control, filtered `currentView`, render-in-one-step snapshot flows, notifications, batch operations, and JSONL recording/replay.
