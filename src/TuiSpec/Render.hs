@@ -12,7 +12,6 @@ can still be supplied when needed.
 module TuiSpec.Render (
     renderAnsiSnapshotFile,
     renderAnsiSnapshotTextFile,
-    stripAnsiText,
 ) where
 
 import Control.Exception (SomeException, catch, throwIO)
@@ -131,65 +130,6 @@ snapshotMetadataPath ansiPath =
     if ".ansi.txt" `isSuffixOf` ansiPath
         then take (length ansiPath - length (".ansi.txt" :: String)) ansiPath <> ".meta.json"
         else ansiPath <> ".meta.json"
-
-{- | Best-effort ANSI escape stripping helper.
-
-Prefer 'renderAnsiSnapshotTextFile' for faithful terminal output.
--}
-stripAnsiText :: T.Text -> T.Text
-stripAnsiText =
-    T.replace "\r\n" "\n"
-        . T.replace "\r" ""
-        . T.pack
-        . go
-        . T.unpack
-  where
-    go :: String -> String
-    go value =
-        case value of
-            [] -> []
-            '\ESC' : '[' : rest ->
-                go (dropCsi rest)
-            '\ESC' : ']' : rest ->
-                go (dropOsc rest)
-            '\ESC' : '(' : _ : rest ->
-                go rest
-            '\ESC' : ')' : _ : rest ->
-                go rest
-            '\ESC' : '*' : _ : rest ->
-                go rest
-            '\ESC' : '+' : _ : rest ->
-                go rest
-            '\ESC' : '-' : _ : rest ->
-                go rest
-            '\ESC' : '.' : _ : rest ->
-                go rest
-            '\ESC' : _ : rest ->
-                go rest
-            charValue : rest
-                | keepChar charValue ->
-                    charValue : go rest
-                | otherwise ->
-                    go rest
-
-    keepChar c =
-        c == '\n' || c == '\t' || (c >= ' ' && c /= '\DEL')
-
-    dropCsi :: String -> String
-    dropCsi input =
-        case input of
-            [] -> []
-            c : rest
-                | c >= '@' && c <= '~' -> rest
-                | otherwise -> dropCsi rest
-
-    dropOsc :: String -> String
-    dropOsc input =
-        case input of
-            [] -> []
-            '\a' : rest -> rest
-            '\ESC' : '\\' : rest -> rest
-            _ : rest -> dropOsc rest
 
 pythonStyledRenderScript :: String
 pythonStyledRenderScript =
