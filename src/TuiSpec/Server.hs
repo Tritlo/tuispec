@@ -12,30 +12,41 @@ module TuiSpec.Server (
     runServer,
 ) where
 
-import Control.Exception (SomeException, displayException, finally, try)
-import Control.Monad (when)
-import Data.Aeson (FromJSON (parseJSON), Result (Error, Success), Value (Null, Object), eitherDecodeStrict', encode, fromJSON, object, withObject, (.:), (.:?), (.=))
+import Control.Concurrent (threadDelay)
+import Control.Exception (SomeException, displayException, finally, throwIO, try)
+import Control.Monad (foldM, when)
+import Data.Aeson (FromJSON (parseJSON), Result (Error, Success), Value (Null, Object), eitherDecode, eitherDecodeStrict', encode, fromJSON, object, withObject, (.:), (.:?), (.=))
 import Data.Aeson.Key qualified as K
 import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.Types qualified as AesonTypes
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BS8
+import Data.ByteString.Lazy qualified as BL
 import Data.ByteString.Lazy.Char8 qualified as BL8
 import Data.Char (isAlphaNum, toLower)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
+import Data.Int (Int64)
 import Data.List (isSuffixOf)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
+import Data.Text.Encoding.Error qualified as TEE
+import Data.Text.IO qualified as TIO
+import Data.Time.Clock (NominalDiffTime, UTCTime, diffUTCTime, getCurrentTime)
+import Data.Time.Clock.POSIX (getPOSIXTime)
 import JSONRPC qualified as RPC
-import System.Directory (doesFileExist)
+import System.Directory (canonicalizePath, doesFileExist)
 import System.Exit (ExitCode (ExitSuccess))
 import System.FilePath ((</>))
 import System.IO (hFlush, stdin, stdout)
 import System.IO.Error (isEOFError, tryIOError)
 import System.Posix.Process (exitImmediately)
 import System.Posix.Signals (Handler (Catch), installHandler, sigHUP)
-import TuiSpec.Runner (currentView, defaultWaitOptionsFor, dumpView, expectNotVisible, expectSnapshot, expectVisible, killSessionChildrenNow, launch, openSession, press, pressCombo, sendLine, typeText, waitForSelector)
-import TuiSpec.Types (AmbiguityMode (FailOnAmbiguous, FirstVisibleMatch), App (..), Key (..), Modifier (Alt, Control, Shift), Rect (Rect), RunOptions (..), Selector (..), SnapshotName (SnapshotName), Tui (..), WaitOptions (..), defaultRunOptions)
+import TuiSpec.Render (renderAnsiSnapshotFileWithFont)
+import TuiSpec.Replay (RecordingDirection (DirectionNotification, DirectionRequest, DirectionResponse), RecordingHandle, ReplaySpeed (ReplayAsFastAsPossible, ReplayRealTime), appendRecordingEvent, closeRecording, openRecording, readRecordingEvents, replayRecordedRequests)
+import TuiSpec.Runner (currentView, defaultWaitOptionsFor, dumpView, expectNotVisible, expectSnapshot, expectVisible, killSessionChildrenNow, launch, openSession, press, pressCombo, renderAnsiViewportText, sendLine, serializeAnsiSnapshot, typeText, waitForSelectorWithAmbiguity)
+import TuiSpec.Types (AmbiguityMode (FailOnAmbiguous, FirstVisibleMatch, LastVisibleMatch), App (..), Key (..), Modifier (Alt, Control, Shift), Rect (Rect), RunOptions (..), Selector (..), SnapshotName (SnapshotName), Tui (..), WaitOptions (..), defaultRunOptions)
 
 -- | Configuration for the JSON-RPC server.
 data ServerOptions = ServerOptions
@@ -56,9 +67,23 @@ data ActiveSession = ActiveSession
     { activeTui :: Tui
     }
 
+data RecordingSession = RecordingSession
+    { activeRecordingPath :: FilePath
+    , activeRecordingHandle :: RecordingHandle
+    }
+
+data ViewSubscription = ViewSubscription
+    { subscriptionDebounceMs :: Int
+    , subscriptionIncludeText :: Bool
+    , subscriptionLastSentMicros :: Maybe Int64
+    , subscriptionLastView :: Maybe Text
+    }
+
 data ServerState = ServerState
     { stateOptions :: ServerOptions
     , stateActiveSession :: IORef (Maybe ActiveSession)
+    , stateRecording :: IORef (Maybe RecordingSession)
+    , stateViewSubscription :: IORef (Maybe ViewSubscription)
     }
 
 data DispatchOutcome
@@ -75,12 +100,21 @@ data RpcFailure = RpcFailure
 runServer :: ServerOptions -> IO ()
 runServer options = do
     sessionRef <- newIORef Nothing
-    let state = ServerState{stateOptions = options, stateActiveSession = sessionRef}
+    recordingRef <- newIORef Nothing
+    subscriptionRef <- newIORef Nothing
+    let state =
+            ServerState
+                { stateOptions = options
+                , stateActiveSession = sessionRef
+                , stateRecording = recordingRef
+                , stateViewSubscription = subscriptionRef
+                }
     _ <- installHandler sigHUP (Catch (handleSighup state)) Nothing
-    loop state `finally` killActiveChildrenNow state
+    loop state `finally` shutdownServer state
   where
     handleSighup state = do
         killActiveChildrenNow state
+        closeActiveRecording state
         exitImmediately ExitSuccess
 
     loop state = do
@@ -96,24 +130,30 @@ runServer options = do
                         shouldContinue <- handleLine state line
                         when shouldContinue (loop state)
 
+shutdownServer :: ServerState -> IO ()
+shutdownServer state = do
+    killActiveChildrenNow state
+    closeActiveRecording state
+
 handleLine :: ServerState -> BS.ByteString -> IO Bool
-handleLine state line =
+handleLine state line = do
+    recordIncomingRequestLine state line
     case eitherDecodeStrict' line :: Either String RPC.JSONRPCRequest of
         Left parseErr -> do
-            writeErrorResponse (RPC.RequestId Null) (parseError parseErr)
+            writeErrorResponse state (RPC.RequestId Null) (parseError parseErr)
         Right request ->
             case validateRequestVersion request of
                 Left err -> do
-                    writeErrorResponse (requestId request) err
+                    writeErrorResponse state (requestId request) err
                 Right () -> do
-                    outcome <- dispatchRequest state request
+                    outcome <- dispatchMethod state (requestMethod request) (requestParams request)
                     case outcome of
                         Left err ->
-                            writeErrorResponse (requestId request) err
+                            writeErrorResponse state (requestId request) err
                         Right (Continue resultValue) ->
-                            writeSuccessResponse (requestId request) resultValue
+                            writeSuccessResponse state (requestId request) resultValue
                         Right (Shutdown resultValue) -> do
-                            _ <- writeSuccessResponse (requestId request) resultValue
+                            _ <- writeSuccessResponse state (requestId request) resultValue
                             pure False
 
 validateRequestVersion :: RPC.JSONRPCRequest -> Either RpcFailure ()
@@ -122,22 +162,32 @@ validateRequestVersion request =
         then Right ()
         else Left (invalidRequest "Expected jsonrpc field to equal \"2.0\"")
 
-dispatchRequest :: ServerState -> RPC.JSONRPCRequest -> IO (Either RpcFailure DispatchOutcome)
-dispatchRequest state request =
-    case requestMethod request of
-        "initialize" -> dispatchInitialize state request
-        "launch" -> dispatchLaunch state request
-        "sendKey" -> dispatchSendKey state request
-        "sendText" -> dispatchSendText state request
-        "sendLine" -> dispatchSendLine state request
-        "currentView" -> dispatchCurrentView state request
-        "dumpView" -> dispatchDumpView state request
-        "expectSnapshot" -> dispatchExpectSnapshot state request
-        "waitForText" -> dispatchWaitForText state request
-        "expectVisible" -> dispatchExpectVisible state request
-        "expectNotVisible" -> dispatchExpectNotVisible state request
-        "server.ping" -> dispatchPing request
-        "server.shutdown" -> dispatchShutdown state request
+dispatchMethod :: ServerState -> Text -> Value -> IO (Either RpcFailure DispatchOutcome)
+dispatchMethod state methodName paramsValue =
+    case methodName of
+        "initialize" -> dispatchInitialize state paramsValue
+        "launch" -> dispatchLaunch state paramsValue
+        "sendKey" -> dispatchSendKey state paramsValue
+        "sendText" -> dispatchSendText state paramsValue
+        "sendLine" -> dispatchSendLine state paramsValue
+        "currentView" -> dispatchCurrentView state paramsValue
+        "dumpView" -> dispatchDumpView state paramsValue
+        "renderView" -> dispatchRenderView state paramsValue
+        "expectSnapshot" -> dispatchExpectSnapshot state paramsValue
+        "waitForText" -> dispatchWaitForText state paramsValue
+        "waitUntil" -> dispatchWaitUntil state paramsValue
+        "diffView" -> dispatchDiffView state paramsValue
+        "expectVisible" -> dispatchExpectVisible state paramsValue
+        "expectNotVisible" -> dispatchExpectNotVisible state paramsValue
+        "viewSubscribe" -> dispatchViewSubscribe state paramsValue
+        "viewUnsubscribe" -> dispatchViewUnsubscribe state paramsValue
+        "batch" -> dispatchBatch state paramsValue
+        "recording.start" -> dispatchRecordingStart state paramsValue
+        "recording.stop" -> dispatchRecordingStop state paramsValue
+        "recording.status" -> dispatchRecordingStatus state paramsValue
+        "replay" -> dispatchReplay state paramsValue
+        "server.ping" -> dispatchPing paramsValue
+        "server.shutdown" -> dispatchShutdown state paramsValue
         unknownMethod ->
             pure $
                 Left
@@ -148,14 +198,14 @@ dispatchRequest state request =
                         }
                     )
 
-dispatchInitialize :: ServerState -> RPC.JSONRPCRequest -> IO (Either RpcFailure DispatchOutcome)
-dispatchInitialize state request = do
+dispatchInitialize :: ServerState -> Value -> IO (Either RpcFailure DispatchOutcome)
+dispatchInitialize state paramsValue = do
     existing <- readIORef (stateActiveSession state)
     case existing of
         Just _ ->
             pure (Left sessionAlreadyStartedError)
         Nothing ->
-            case decodeParams request of
+            case decodeParamsValue paramsValue of
                 Left err -> pure (Left err)
                 Right params -> do
                     let sessionName = T.unpack (T.strip (fromMaybeText "session" (startName params)))
@@ -184,94 +234,157 @@ dispatchInitialize state request = do
                                                             ]
                                                         )
 
-dispatchLaunch :: ServerState -> RPC.JSONRPCRequest -> IO (Either RpcFailure DispatchOutcome)
-dispatchLaunch state request =
+dispatchLaunch :: ServerState -> Value -> IO (Either RpcFailure DispatchOutcome)
+dispatchLaunch state paramsValue =
     withActiveSession state $ \active ->
-        case decodeParams request of
+        case decodeParamsValue paramsValue of
             Left err -> pure (Left err)
             Right params ->
-                runMethod $
+                runMethod $ do
+                    let tui = activeTui active
                     launch
-                        (activeTui active)
+                        tui
                         App
                             { command = launchCommand params
                             , args = launchArgs params
                             , env = launchEnv params
+                            , cwd = launchCwd params
                             }
-                        >> pure (object ["ok" .= True])
+                    case launchReadySelector params of
+                        Nothing -> pure ()
+                        Just selector -> do
+                            let defaults = defaultWaitOptionsFor tui
+                            let waitOptions = mergeWaitOptions defaults (launchReadyTimeoutMs params) (launchReadyPollIntervalMs params)
+                            waitForSelectorWithAmbiguity tui waitOptions Nothing selector
+                    emitViewChangedNotification state tui
+                    pure (object ["ok" .= True])
 
-dispatchSendKey :: ServerState -> RPC.JSONRPCRequest -> IO (Either RpcFailure DispatchOutcome)
-dispatchSendKey state request =
+dispatchSendKey :: ServerState -> Value -> IO (Either RpcFailure DispatchOutcome)
+dispatchSendKey state paramsValue =
     withActiveSession state $ \active ->
-        case decodeParams request of
+        case decodeParamsValue paramsValue of
             Left err -> pure (Left err)
             Right params ->
                 case parseSendKey (sendKeyValue params) of
                     Left keyErr -> pure (Left (invalidParams keyErr))
                     Right (modifiers, keyValue) ->
-                        runMethod $
-                            do
-                                if null modifiers
-                                    then press (activeTui active) keyValue
-                                    else pressCombo (activeTui active) modifiers keyValue
-                                pure (object ["ok" .= True])
+                        runMethod $ do
+                            let tui = activeTui active
+                            if null modifiers
+                                then press tui keyValue
+                                else pressCombo tui modifiers keyValue
+                            emitViewChangedNotification state tui
+                            pure (object ["ok" .= True])
 
-dispatchSendText :: ServerState -> RPC.JSONRPCRequest -> IO (Either RpcFailure DispatchOutcome)
-dispatchSendText state request =
+dispatchSendText :: ServerState -> Value -> IO (Either RpcFailure DispatchOutcome)
+dispatchSendText state paramsValue =
     withActiveSession state $ \active ->
-        case decodeParams request of
+        case decodeParamsValue paramsValue of
             Left err -> pure (Left err)
             Right params ->
-                runMethod $
-                    typeText (activeTui active) (sendTextValue params)
-                        >> pure (object ["ok" .= True])
-
-dispatchSendLine :: ServerState -> RPC.JSONRPCRequest -> IO (Either RpcFailure DispatchOutcome)
-dispatchSendLine state request =
-    withActiveSession state $ \active ->
-        case decodeParams request of
-            Left err -> pure (Left err)
-            Right params ->
-                runMethod $
-                    sendLine (activeTui active) (sendLineValue params)
-                        >> pure (object ["ok" .= True])
-
-dispatchCurrentView :: ServerState -> RPC.JSONRPCRequest -> IO (Either RpcFailure DispatchOutcome)
-dispatchCurrentView state request =
-    withActiveSession state $ \active ->
-        case requireNoParams request of
-            Left err -> pure (Left err)
-            Right () ->
                 runMethod $ do
-                    textValue <- currentView (activeTui active)
-                    let options = tuiOptions (activeTui active)
+                    let tui = activeTui active
+                    typeText tui (sendTextValue params)
+                    emitViewChangedNotification state tui
+                    pure (object ["ok" .= True])
+
+dispatchSendLine :: ServerState -> Value -> IO (Either RpcFailure DispatchOutcome)
+dispatchSendLine state paramsValue =
+    withActiveSession state $ \active ->
+        case decodeParamsValue paramsValue of
+            Left err -> pure (Left err)
+            Right params ->
+                case resolveAmbiguityOverride (sendLineAmbiguityMode params) of
+                    Left ambiguityErr -> pure (Left (invalidParams ambiguityErr))
+                    Right ambiguityOverride ->
+                        runMethod $ do
+                            let tui = activeTui active
+                            sendLine tui (sendLineValue params)
+                            case sendLineExpectAfter params of
+                                Nothing -> pure ()
+                                Just selector -> do
+                                    let defaults = defaultWaitOptionsFor tui
+                                    let waitOptions = mergeWaitOptions defaults (sendLineTimeoutMs params) (sendLinePollIntervalMs params)
+                                    waitForSelectorWithAmbiguity tui waitOptions ambiguityOverride selector
+                            emitViewChangedNotification state tui
+                            pure (object ["ok" .= True])
+
+dispatchCurrentView :: ServerState -> Value -> IO (Either RpcFailure DispatchOutcome)
+dispatchCurrentView state paramsValue =
+    withActiveSession state $ \active ->
+        case decodeParamsValue paramsValue of
+            Left err -> pure (Left err)
+            Right params ->
+                let options = tuiOptions (activeTui active)
+                    totalRows = terminalRows options
+                    totalCols = terminalCols options
+                 in case resolveCurrentViewFilter params totalRows totalCols of
+                        Left filterErr -> pure (Left (invalidParams filterErr))
+                        Right filterValue ->
+                            runMethod $ do
+                                textValue <- currentView (activeTui active)
+                                let (filteredText, outRows, outCols) = applyCurrentViewFilter filterValue totalRows totalCols textValue
+                                pure
+                                    ( object
+                                        [ "text" .= filteredText
+                                        , "rows" .= outRows
+                                        , "cols" .= outCols
+                                        ]
+                                    )
+
+dispatchDumpView :: ServerState -> Value -> IO (Either RpcFailure DispatchOutcome)
+dispatchDumpView state paramsValue =
+    withActiveSession state $ \active ->
+        case decodeParamsValue paramsValue of
+            Left err -> pure (Left err)
+            Right params ->
+                runMethod $ do
+                    let tui = activeTui active
+                    ansiPathRaw <- dumpView tui (SnapshotName (dumpName params))
+                    ansiPath <- canonicalizeExistingPath ansiPathRaw
+                    metaPath <- canonicalizeExistingPath (snapshotMetaPath ansiPath)
+                    artifactRoot <- canonicalizePath (tuiTestRoot tui)
+                    maybePngPath <-
+                        case dumpFormat params of
+                            DumpAnsi -> pure Nothing
+                            DumpPng -> Just <$> renderSnapshotFromDump params ansiPath
+                            DumpBoth -> Just <$> renderSnapshotFromDump params ansiPath
                     pure
                         ( object
-                            [ "text" .= textValue
-                            , "rows" .= terminalRows options
-                            , "cols" .= terminalCols options
-                            ]
+                            ( [ "snapshotPath" .= ansiPath
+                              , "metaPath" .= metaPath
+                              , "artifactRoot" .= artifactRoot
+                              ]
+                                <> maybe [] (\pngPath -> ["pngPath" .= pngPath]) maybePngPath
+                            )
                         )
 
-dispatchDumpView :: ServerState -> RPC.JSONRPCRequest -> IO (Either RpcFailure DispatchOutcome)
-dispatchDumpView state request =
+dispatchRenderView :: ServerState -> Value -> IO (Either RpcFailure DispatchOutcome)
+dispatchRenderView state paramsValue =
     withActiveSession state $ \active ->
-        case decodeParams request of
+        case decodeParamsValue paramsValue of
             Left err -> pure (Left err)
             Right params ->
                 runMethod $ do
-                    ansiPath <- dumpView (activeTui active) (SnapshotName (dumpName params))
+                    let tui = activeTui active
+                    ansiPathRaw <- dumpView tui (SnapshotName (renderViewName params))
+                    ansiPath <- canonicalizeExistingPath ansiPathRaw
+                    metaPath <- canonicalizeExistingPath (snapshotMetaPath ansiPath)
+                    artifactRoot <- canonicalizePath (tuiTestRoot tui)
+                    pngPath <- renderSnapshotFromRenderView params ansiPath
                     pure
                         ( object
                             [ "snapshotPath" .= ansiPath
-                            , "metaPath" .= snapshotMetaPath ansiPath
+                            , "metaPath" .= metaPath
+                            , "pngPath" .= pngPath
+                            , "artifactRoot" .= artifactRoot
                             ]
                         )
 
-dispatchExpectSnapshot :: ServerState -> RPC.JSONRPCRequest -> IO (Either RpcFailure DispatchOutcome)
-dispatchExpectSnapshot state request =
+dispatchExpectSnapshot :: ServerState -> Value -> IO (Either RpcFailure DispatchOutcome)
+dispatchExpectSnapshot state paramsValue =
     withActiveSession state $ \active ->
-        case decodeParams request of
+        case decodeParamsValue paramsValue of
             Left err -> pure (Left err)
             Right params ->
                 runMethod $ do
@@ -291,46 +404,212 @@ dispatchExpectSnapshot state request =
                             ]
                         )
 
-dispatchWaitForText :: ServerState -> RPC.JSONRPCRequest -> IO (Either RpcFailure DispatchOutcome)
-dispatchWaitForText state request =
+dispatchWaitForText :: ServerState -> Value -> IO (Either RpcFailure DispatchOutcome)
+dispatchWaitForText state paramsValue =
     withActiveSession state $ \active ->
-        case decodeParams request of
+        case decodeParamsValue paramsValue of
+            Left err -> pure (Left err)
+            Right params ->
+                case resolveAmbiguityOverride (waitAmbiguityMode params) of
+                    Left ambiguityErr -> pure (Left (invalidParams ambiguityErr))
+                    Right ambiguityOverride ->
+                        runMethod $ do
+                            let tui = activeTui active
+                            let defaults = defaultWaitOptionsFor tui
+                            let mergedWaitOptions = mergeWaitOptions defaults (waitTimeoutMs params) (waitPollIntervalMs params)
+                            waitForSelectorWithAmbiguity tui mergedWaitOptions ambiguityOverride (waitSelector params)
+                            pure (object ["ok" .= True])
+
+dispatchWaitUntil :: ServerState -> Value -> IO (Either RpcFailure DispatchOutcome)
+dispatchWaitUntil state paramsValue =
+    withActiveSession state $ \active ->
+        case decodeParamsValue paramsValue of
             Left err -> pure (Left err)
             Right params ->
                 runMethod $ do
                     let tui = activeTui active
                     let defaults = defaultWaitOptionsFor tui
-                    let mergedWaitOptions =
-                            defaults
-                                { timeoutMs = maybe (timeoutMs defaults) id (waitTimeoutMs params)
-                                , pollIntervalMs = maybe (pollIntervalMs defaults) id (waitPollIntervalMs params)
-                                }
-                    waitForSelector tui mergedWaitOptions (waitSelector params)
+                    let mergedWaitOptions = mergeWaitOptions defaults (waitUntilTimeoutMs params) (waitUntilPollIntervalMs params)
+                    waitUntilPattern tui mergedWaitOptions (waitUntilPatternValue params)
                     pure (object ["ok" .= True])
 
-dispatchExpectVisible :: ServerState -> RPC.JSONRPCRequest -> IO (Either RpcFailure DispatchOutcome)
-dispatchExpectVisible state request =
+dispatchDiffView :: ServerState -> Value -> IO (Either RpcFailure DispatchOutcome)
+dispatchDiffView state paramsValue =
     withActiveSession state $ \active ->
-        case decodeParams request of
+        case decodeParamsValue paramsValue of
+            Left err -> pure (Left err)
+            Right params ->
+                runMethod $ do
+                    let options = tuiOptions (activeTui active)
+                    diffResult <- computeSnapshotDiff options params
+                    pure
+                        ( object
+                            [ "changed" .= diffChanged diffResult
+                            , "changedLines" .= diffChangedLines diffResult
+                            , "summary" .= diffSummary diffResult
+                            ]
+                        )
+
+dispatchExpectVisible :: ServerState -> Value -> IO (Either RpcFailure DispatchOutcome)
+dispatchExpectVisible state paramsValue =
+    withActiveSession state $ \active ->
+        case decodeParamsValue paramsValue of
             Left err -> pure (Left err)
             Right params ->
                 runMethod $
                     expectVisible (activeTui active) (selectorValue params)
                         >> pure (object ["ok" .= True])
 
-dispatchExpectNotVisible :: ServerState -> RPC.JSONRPCRequest -> IO (Either RpcFailure DispatchOutcome)
-dispatchExpectNotVisible state request =
+dispatchExpectNotVisible :: ServerState -> Value -> IO (Either RpcFailure DispatchOutcome)
+dispatchExpectNotVisible state paramsValue =
     withActiveSession state $ \active ->
-        case decodeParams request of
+        case decodeParamsValue paramsValue of
             Left err -> pure (Left err)
             Right params ->
                 runMethod $
                     expectNotVisible (activeTui active) (selectorValue params)
                         >> pure (object ["ok" .= True])
 
-dispatchPing :: RPC.JSONRPCRequest -> IO (Either RpcFailure DispatchOutcome)
-dispatchPing request =
-    case requireNoParams request of
+dispatchViewSubscribe :: ServerState -> Value -> IO (Either RpcFailure DispatchOutcome)
+dispatchViewSubscribe state paramsValue =
+    withActiveSession state $ \active ->
+        case decodeParamsValue paramsValue of
+            Left err -> pure (Left err)
+            Right params ->
+                if subscribeDebounceMs params < 0
+                    then pure (Left (invalidParams "debounceMs must be >= 0"))
+                    else runMethod $ do
+                        let subscription =
+                                ViewSubscription
+                                    { subscriptionDebounceMs = subscribeDebounceMs params
+                                    , subscriptionIncludeText = subscribeIncludeText params
+                                    , subscriptionLastSentMicros = Nothing
+                                    , subscriptionLastView = Nothing
+                                    }
+                        writeIORef (stateViewSubscription state) (Just subscription)
+                        emitViewChangedNotification state (activeTui active)
+                        pure
+                            ( object
+                                [ "ok" .= True
+                                , "debounceMs" .= subscribeDebounceMs params
+                                , "includeText" .= subscribeIncludeText params
+                                ]
+                            )
+
+dispatchViewUnsubscribe :: ServerState -> Value -> IO (Either RpcFailure DispatchOutcome)
+dispatchViewUnsubscribe state paramsValue =
+    case requireNoParamsValue paramsValue of
+        Left err -> pure (Left err)
+        Right () ->
+            runMethod $ do
+                writeIORef (stateViewSubscription state) Nothing
+                pure (object ["ok" .= True])
+
+dispatchBatch :: ServerState -> Value -> IO (Either RpcFailure DispatchOutcome)
+dispatchBatch state paramsValue =
+    case decodeParamsValue paramsValue of
+        Left err -> pure (Left err)
+        Right params ->
+            runMethod $ do
+                (completed, results, maybeFailure) <- foldM runBatchStep (0 :: Int, [], Nothing) (batchSteps params)
+                case maybeFailure of
+                    Nothing ->
+                        pure
+                            ( object
+                                [ "ok" .= True
+                                , "completed" .= completed
+                                , "results" .= reverse results
+                                ]
+                            )
+                    Just (stepIndex, failureValue) ->
+                        pure
+                            ( object
+                                [ "ok" .= False
+                                , "completed" .= completed
+                                , "results" .= reverse results
+                                , "errorStep" .= stepIndex
+                                , "error" .= failureValue
+                                ]
+                            )
+  where
+    runBatchStep (completed, results, Just existingFailure) _ =
+        pure (completed, results, Just existingFailure)
+    runBatchStep (completed, results, Nothing) stepValue = do
+        outcome <- dispatchMethod state (batchStepMethod stepValue) (batchStepParams stepValue)
+        case outcome of
+            Left err ->
+                pure (completed, results, Just (completed + 1, rpcFailureToValue err))
+            Right (Shutdown _) ->
+                pure (completed, results, Just (completed + 1, object ["code" .= (-32020 :: Int), "message" .= ("batch step cannot call server.shutdown" :: Text)]))
+            Right (Continue value) ->
+                pure (completed + 1, value : results, Nothing)
+
+dispatchRecordingStart :: ServerState -> Value -> IO (Either RpcFailure DispatchOutcome)
+dispatchRecordingStart state paramsValue =
+    case decodeParamsValue paramsValue of
+        Left err -> pure (Left err)
+        Right params ->
+            runMethod $ do
+                closeActiveRecording state
+                handle <- openRecording (recordingStartPath params)
+                canonicalPath <- canonicalizePath (recordingStartPath params)
+                writeIORef
+                    (stateRecording state)
+                    (Just (RecordingSession canonicalPath handle))
+                pure
+                    ( object
+                        [ "ok" .= True
+                        , "path" .= canonicalPath
+                        ]
+                    )
+
+dispatchRecordingStop :: ServerState -> Value -> IO (Either RpcFailure DispatchOutcome)
+dispatchRecordingStop state paramsValue =
+    case requireNoParamsValue paramsValue of
+        Left err -> pure (Left err)
+        Right () ->
+            runMethod $ do
+                closeActiveRecording state
+                pure (object ["ok" .= True])
+
+dispatchRecordingStatus :: ServerState -> Value -> IO (Either RpcFailure DispatchOutcome)
+dispatchRecordingStatus state paramsValue =
+    case requireNoParamsValue paramsValue of
+        Left err -> pure (Left err)
+        Right () ->
+            runMethod $ do
+                active <- readIORef (stateRecording state)
+                pure
+                    ( object
+                        [ "active" .= isJust active
+                        , "path" .= fmap activeRecordingPath active
+                        ]
+                    )
+
+dispatchReplay :: ServerState -> Value -> IO (Either RpcFailure DispatchOutcome)
+dispatchReplay state paramsValue =
+    case decodeParamsValue paramsValue of
+        Left err -> pure (Left err)
+        Right params ->
+            runMethod $ do
+                events <- readRecordingEvents (replayPath params)
+                replayed <-
+                    replayRecordedRequests
+                        (replaySpeed params)
+                        events
+                        (replayRecordedRequestLine state)
+                pure
+                    ( object
+                        [ "ok" .= True
+                        , "replayedRequests" .= replayed
+                        , "path" .= replayPath params
+                        , "speed" .= renderReplaySpeed (replaySpeed params)
+                        ]
+                    )
+
+dispatchPing :: Value -> IO (Either RpcFailure DispatchOutcome)
+dispatchPing paramsValue =
+    case requireNoParamsValue paramsValue of
         Left err -> pure (Left err)
         Right () ->
             pure
@@ -344,9 +623,9 @@ dispatchPing request =
                     )
                 )
 
-dispatchShutdown :: ServerState -> RPC.JSONRPCRequest -> IO (Either RpcFailure DispatchOutcome)
-dispatchShutdown state request =
-    case requireNoParams request of
+dispatchShutdown :: ServerState -> Value -> IO (Either RpcFailure DispatchOutcome)
+dispatchShutdown state paramsValue =
+    case requireNoParamsValue paramsValue of
         Left err -> pure (Left err)
         Right () -> do
             killActiveChildrenNow state
@@ -374,6 +653,15 @@ killActiveChildrenNow state = do
         Nothing -> pure ()
         Just active -> killSessionChildrenNow (activeTui active)
 
+closeActiveRecording :: ServerState -> IO ()
+closeActiveRecording state = do
+    maybeRecording <- readIORef (stateRecording state)
+    case maybeRecording of
+        Nothing -> pure ()
+        Just recording -> do
+            closeRecording (activeRecordingHandle recording)
+            writeIORef (stateRecording state) Nothing
+
 runMethod :: IO Value -> IO (Either RpcFailure DispatchOutcome)
 runMethod action = do
     result <- try action :: IO (Either SomeException Value)
@@ -382,16 +670,20 @@ runMethod action = do
             Left err -> Left (methodFailed (displayException err))
             Right value -> Right (Continue value)
 
-writeSuccessResponse :: RPC.RequestId -> Value -> IO Bool
-writeSuccessResponse reqId resultValue =
+writeSuccessResponse :: ServerState -> RPC.RequestId -> Value -> IO Bool
+writeSuccessResponse state reqId resultValue =
     writeJsonLine
+        state
+        DirectionResponse
         ( encode
             (RPC.JSONRPCResponse RPC.rPC_VERSION reqId resultValue)
         )
 
-writeErrorResponse :: RPC.RequestId -> RpcFailure -> IO Bool
-writeErrorResponse reqId failure =
+writeErrorResponse :: ServerState -> RPC.RequestId -> RpcFailure -> IO Bool
+writeErrorResponse state reqId failure =
     writeJsonLine
+        state
+        DirectionResponse
         ( encode
             ( RPC.JSONRPCError
                 RPC.rPC_VERSION
@@ -400,27 +692,65 @@ writeErrorResponse reqId failure =
             )
         )
 
-writeJsonLine :: BL8.ByteString -> IO Bool
-writeJsonLine bytes = do
+writeNotification :: ServerState -> Text -> Value -> IO Bool
+writeNotification state methodName paramsValue =
+    writeJsonLine
+        state
+        DirectionNotification
+        ( encode
+            ( object
+                [ "jsonrpc" .= RPC.rPC_VERSION
+                , "method" .= methodName
+                , "params" .= paramsValue
+                ]
+            )
+        )
+
+writeJsonLine :: ServerState -> RecordingDirection -> BL8.ByteString -> IO Bool
+writeJsonLine state direction bytes = do
     writeResult <-
         tryIOError $ do
             BL8.hPutStr stdout bytes
             BL8.hPutStr stdout "\n"
             hFlush stdout
-    pure $
-        case writeResult of
-            Left _ -> False
-            Right () -> True
+    case writeResult of
+        Left _ -> pure False
+        Right () -> do
+            recordOutgoingLine state direction bytes
+            pure True
 
-decodeParams :: (FromJSON a) => RPC.JSONRPCRequest -> Either RpcFailure a
-decodeParams request =
-    case fromJSON (requestParams request) of
+recordIncomingRequestLine :: ServerState -> BS.ByteString -> IO ()
+recordIncomingRequestLine state line =
+    withActiveRecording state $ \recording ->
+        appendRecordingEvent
+            (activeRecordingHandle recording)
+            DirectionRequest
+            (TE.decodeUtf8With TEE.lenientDecode line)
+
+recordOutgoingLine :: ServerState -> RecordingDirection -> BL.ByteString -> IO ()
+recordOutgoingLine state direction line =
+    withActiveRecording state $ \recording ->
+        appendRecordingEvent
+            (activeRecordingHandle recording)
+            direction
+            (TE.decodeUtf8With TEE.lenientDecode (BL.toStrict line))
+
+withActiveRecording :: ServerState -> (RecordingSession -> IO ()) -> IO ()
+withActiveRecording state action = do
+    maybeRecording <- readIORef (stateRecording state)
+    case maybeRecording of
+        Nothing -> pure ()
+        Just recording -> action recording
+
+decodeParamsValue :: (FromJSON a) => Value -> Either RpcFailure a
+decodeParamsValue paramsValue =
+    case fromJSON paramsValue of
         Error err -> Left (invalidParams err)
         Success value -> Right value
 
-requireNoParams :: RPC.JSONRPCRequest -> Either RpcFailure ()
-requireNoParams request =
-    case requestParams request of
+requireNoParamsValue :: Value -> Either RpcFailure ()
+requireNoParamsValue paramsValue =
+    case paramsValue of
         Null -> Right ()
         Object keyMap
             | KM.null keyMap -> Right ()
@@ -457,6 +787,14 @@ methodFailed details =
         , failureMessage = "Method failed"
         , failureData = Just (object ["details" .= details])
         }
+
+rpcFailureToValue :: RpcFailure -> Value
+rpcFailureToValue failure =
+    object
+        [ "code" .= failureCode failure
+        , "message" .= failureMessage failure
+        , "data" .= failureData failure
+        ]
 
 noActiveSessionError :: RpcFailure
 noActiveSessionError =
@@ -516,7 +854,11 @@ defaultStartParams =
 data LaunchParams = LaunchParams
     { launchCommand :: FilePath
     , launchArgs :: [String]
-    , launchEnv :: Maybe [(String, String)]
+    , launchEnv :: Maybe [(String, Maybe String)]
+    , launchCwd :: Maybe FilePath
+    , launchReadySelector :: Maybe Selector
+    , launchReadyTimeoutMs :: Maybe Int
+    , launchReadyPollIntervalMs :: Maybe Int
     }
 
 instance FromJSON LaunchParams where
@@ -526,16 +868,23 @@ instance FromJSON LaunchParams where
                 <$> o .: "command"
                 <*> o .:? "args" AesonTypes..!= []
                 <*> (o .:? "env" >>= traverse parseLaunchEnvObject)
+                <*> o .:? "cwd"
+                <*> (o .:? "readySelector" >>= traverse parseSelector)
+                <*> o .:? "readyTimeoutMs"
+                <*> o .:? "readyPollIntervalMs"
 
-parseLaunchEnvObject :: Value -> AesonTypes.Parser [(String, String)]
+parseLaunchEnvObject :: Value -> AesonTypes.Parser [(String, Maybe String)]
 parseLaunchEnvObject =
     withObject "launch.env" $ \envObject ->
         mapM parseLaunchEnvPair (KM.toList envObject)
 
-parseLaunchEnvPair :: (K.Key, Value) -> AesonTypes.Parser (String, String)
-parseLaunchEnvPair (key, value) = do
-    textValue <- (AesonTypes.parseJSON value :: AesonTypes.Parser Text)
-    pure (K.toString key, T.unpack textValue)
+parseLaunchEnvPair :: (K.Key, Value) -> AesonTypes.Parser (String, Maybe String)
+parseLaunchEnvPair (key, value) =
+    case value of
+        Null -> pure (K.toString key, Nothing)
+        _ -> do
+            textValue <- (AesonTypes.parseJSON value :: AesonTypes.Parser Text)
+            pure (K.toString key, Just (T.unpack textValue))
 
 data SendKeyParams = SendKeyParams
     { sendKeyValue :: Text
@@ -557,21 +906,141 @@ instance FromJSON SendTextParams where
 
 data SendLineParams = SendLineParams
     { sendLineValue :: Text
+    , sendLineExpectAfter :: Maybe Selector
+    , sendLineTimeoutMs :: Maybe Int
+    , sendLinePollIntervalMs :: Maybe Int
+    , sendLineAmbiguityMode :: Maybe Text
     }
 
 instance FromJSON SendLineParams where
     parseJSON =
         withObject "SendLineParams" $ \o ->
-            SendLineParams <$> o .: "text"
+            SendLineParams
+                <$> o .: "text"
+                <*> (o .:? "expectAfter" >>= traverse parseSelector)
+                <*> o .:? "timeoutMs"
+                <*> o .:? "pollIntervalMs"
+                <*> o .:? "ambiguityMode"
+
+data CurrentViewParams = CurrentViewParams
+    { currentRowsFilter :: Maybe CurrentViewRowsFilter
+    , currentRegionFilter :: Maybe CurrentViewRegionFilter
+    , currentEntireRowFilter :: Maybe Int
+    , currentEntireColFilter :: Maybe Int
+    }
+
+instance FromJSON CurrentViewParams where
+    parseJSON value =
+        case value of
+            Null -> pure defaultCurrentViewParams
+            _ ->
+                withObject
+                    "CurrentViewParams"
+                    ( \o ->
+                        CurrentViewParams
+                            <$> o .:? "rows"
+                            <*> o .:? "region"
+                            <*> o .:? "entireRow"
+                            <*> o .:? "entireCol"
+                    )
+                    value
+
+defaultCurrentViewParams :: CurrentViewParams
+defaultCurrentViewParams =
+    CurrentViewParams
+        { currentRowsFilter = Nothing
+        , currentRegionFilter = Nothing
+        , currentEntireRowFilter = Nothing
+        , currentEntireColFilter = Nothing
+        }
+
+data CurrentViewRowsFilter = CurrentViewRowsFilter
+    { currentRowsStart :: Int
+    , currentRowsEnd :: Int
+    }
+
+instance FromJSON CurrentViewRowsFilter where
+    parseJSON =
+        withObject "CurrentViewRowsFilter" $ \o ->
+            CurrentViewRowsFilter
+                <$> o .: "start"
+                <*> o .: "end"
+
+data CurrentViewRegionFilter = CurrentViewRegionFilter
+    { currentRegionCol :: Int
+    , currentRegionRow :: Int
+    , currentRegionWidth :: Int
+    , currentRegionHeight :: Int
+    }
+
+instance FromJSON CurrentViewRegionFilter where
+    parseJSON =
+        withObject "CurrentViewRegionFilter" $ \o ->
+            CurrentViewRegionFilter
+                <$> o .: "col"
+                <*> o .: "row"
+                <*> o .: "width"
+                <*> o .: "height"
+
+data DumpFormat
+    = DumpAnsi
+    | DumpPng
+    | DumpBoth
+    deriving (Eq, Show)
+
+parseDumpFormat :: Text -> Maybe DumpFormat
+parseDumpFormat raw =
+    case map toLower (T.unpack (T.strip raw)) of
+        "ansi" -> Just DumpAnsi
+        "png" -> Just DumpPng
+        "both" -> Just DumpBoth
+        _ -> Nothing
 
 data DumpViewParams = DumpViewParams
     { dumpName :: Text
+    , dumpFormat :: DumpFormat
+    , dumpTheme :: Maybe String
+    , dumpFontPath :: Maybe FilePath
+    , dumpRows :: Maybe Int
+    , dumpCols :: Maybe Int
     }
 
 instance FromJSON DumpViewParams where
     parseJSON =
-        withObject "DumpViewParams" $ \o ->
-            DumpViewParams <$> o .: "name"
+        withObject "DumpViewParams" $ \o -> do
+            maybeFormat <- o .:? "format"
+            formatValue <-
+                case maybeFormat of
+                    Nothing -> pure DumpAnsi
+                    Just raw ->
+                        case parseDumpFormat raw of
+                            Just parsed -> pure parsed
+                            Nothing -> fail "format must be one of: ansi, png, both"
+            DumpViewParams
+                <$> o .: "name"
+                <*> pure formatValue
+                <*> o .:? "theme"
+                <*> o .:? "font"
+                <*> o .:? "rows"
+                <*> o .:? "cols"
+
+data RenderViewParams = RenderViewParams
+    { renderViewName :: Text
+    , renderViewTheme :: Maybe String
+    , renderViewFontPath :: Maybe FilePath
+    , renderViewRows :: Maybe Int
+    , renderViewCols :: Maybe Int
+    }
+
+instance FromJSON RenderViewParams where
+    parseJSON =
+        withObject "RenderViewParams" $ \o ->
+            RenderViewParams
+                <$> o .: "name"
+                <*> o .:? "theme"
+                <*> o .:? "font"
+                <*> o .:? "rows"
+                <*> o .:? "cols"
 
 data ExpectSnapshotParams = ExpectSnapshotParams
     { expectSnapshotNameValue :: Text
@@ -595,6 +1064,7 @@ data WaitForTextParams = WaitForTextParams
     { waitSelector :: Selector
     , waitTimeoutMs :: Maybe Int
     , waitPollIntervalMs :: Maybe Int
+    , waitAmbiguityMode :: Maybe Text
     }
 
 instance FromJSON WaitForTextParams where
@@ -604,6 +1074,146 @@ instance FromJSON WaitForTextParams where
                 <$> (o .: "selector" >>= parseSelector)
                 <*> o .:? "timeoutMs"
                 <*> o .:? "pollIntervalMs"
+                <*> o .:? "ambiguityMode"
+
+data WaitUntilParams = WaitUntilParams
+    { waitUntilPatternValue :: Text
+    , waitUntilTimeoutMs :: Maybe Int
+    , waitUntilPollIntervalMs :: Maybe Int
+    }
+
+instance FromJSON WaitUntilParams where
+    parseJSON =
+        withObject "WaitUntilParams" $ \o ->
+            WaitUntilParams
+                <$> o .: "pattern"
+                <*> o .:? "timeoutMs"
+                <*> o .:? "pollIntervalMs"
+
+data DiffMode
+    = DiffText
+    | DiffStyled
+    deriving (Eq, Show)
+
+data DiffViewParams = DiffViewParams
+    { diffLeftPath :: FilePath
+    , diffRightPath :: FilePath
+    , diffMode :: DiffMode
+    }
+
+instance FromJSON DiffViewParams where
+    parseJSON =
+        withObject "DiffViewParams" $ \o -> do
+            maybeMode <- o .:? "mode"
+            modeValue <-
+                case maybeMode of
+                    Nothing -> pure DiffText
+                    Just raw ->
+                        case parseDiffMode raw of
+                            Just modeValue -> pure modeValue
+                            Nothing -> fail "mode must be one of: text, styled"
+            DiffViewParams
+                <$> o .: "leftPath"
+                <*> o .: "rightPath"
+                <*> pure modeValue
+
+parseDiffMode :: Text -> Maybe DiffMode
+parseDiffMode raw =
+    case map toLower (T.unpack (T.strip raw)) of
+        "text" -> Just DiffText
+        "styled" -> Just DiffStyled
+        _ -> Nothing
+
+data ViewSubscribeParams = ViewSubscribeParams
+    { subscribeDebounceMs :: Int
+    , subscribeIncludeText :: Bool
+    }
+
+instance FromJSON ViewSubscribeParams where
+    parseJSON value =
+        case value of
+            Null -> pure defaultViewSubscribeParams
+            _ ->
+                withObject
+                    "ViewSubscribeParams"
+                    ( \o ->
+                        ViewSubscribeParams
+                            <$> o .:? "debounceMs" AesonTypes..!= 100
+                            <*> o .:? "includeText" AesonTypes..!= False
+                    )
+                    value
+
+defaultViewSubscribeParams :: ViewSubscribeParams
+defaultViewSubscribeParams =
+    ViewSubscribeParams
+        { subscribeDebounceMs = 100
+        , subscribeIncludeText = False
+        }
+
+data BatchParams = BatchParams
+    { batchSteps :: [BatchStep]
+    }
+
+instance FromJSON BatchParams where
+    parseJSON =
+        withObject "BatchParams" $ \o ->
+            BatchParams
+                <$> o .:? "steps" AesonTypes..!= []
+
+data BatchStep = BatchStep
+    { batchStepMethod :: Text
+    , batchStepParams :: Value
+    }
+
+instance FromJSON BatchStep where
+    parseJSON =
+        withObject "BatchStep" $ \o ->
+            BatchStep
+                <$> o .: "method"
+                <*> o .:? "params" AesonTypes..!= Null
+
+data RecordingStartParams = RecordingStartParams
+    { recordingStartPath :: FilePath
+    }
+
+instance FromJSON RecordingStartParams where
+    parseJSON =
+        withObject "RecordingStartParams" $ \o ->
+            RecordingStartParams
+                <$> o .: "path"
+
+data ReplayParams = ReplayParams
+    { replayPath :: FilePath
+    , replaySpeed :: ReplaySpeed
+    }
+
+instance FromJSON ReplayParams where
+    parseJSON =
+        withObject "ReplayParams" $ \o -> do
+            maybeSpeed <- o .:? "speed"
+            speed <-
+                case maybeSpeed of
+                    Nothing -> pure ReplayAsFastAsPossible
+                    Just raw ->
+                        case parseReplaySpeed raw of
+                            Just speed -> pure speed
+                            Nothing -> fail "speed must be one of: as-fast-as-possible, real-time"
+            ReplayParams
+                <$> o .: "path"
+                <*> pure speed
+
+parseReplaySpeed :: Text -> Maybe ReplaySpeed
+parseReplaySpeed raw =
+    case map toLower (T.unpack (T.strip raw)) of
+        "as-fast-as-possible" -> Just ReplayAsFastAsPossible
+        "real-time" -> Just ReplayRealTime
+        _ -> Nothing
+
+renderReplaySpeed :: ReplaySpeed -> Text
+renderReplaySpeed speed =
+    case speed of
+        ReplayAsFastAsPossible -> "as-fast-as-possible"
+        ReplayRealTime -> "real-time"
 
 parseSelector :: Value -> AesonTypes.Parser Selector
 parseSelector =
@@ -612,7 +1222,12 @@ parseSelector =
         case selectorType of
             "exact" -> Exact <$> o .: "text"
             "regex" -> Regex <$> o .: "pattern"
-            "at" -> At <$> o .: "col" <*> o .: "row"
+            "at" -> do
+                col <- o .: "col"
+                row <- o .: "row"
+                if col < 1 || row < 1
+                    then fail "selector.at uses 1-based coordinates; col/row must be >= 1"
+                    else pure (At (col - 1) (row - 1))
             "within" -> do
                 rectValue <- o .: "rect" >>= parseRect
                 nested <- o .: "selector" >>= parseSelector
@@ -622,12 +1237,17 @@ parseSelector =
 
 parseRect :: Value -> AesonTypes.Parser Rect
 parseRect =
-    withObject "Rect" $ \o ->
-        Rect
-            <$> o .: "col"
-            <*> o .: "row"
-            <*> o .: "width"
-            <*> o .: "height"
+    withObject "Rect" $ \o -> do
+        col <- o .: "col"
+        row <- o .: "row"
+        width <- o .: "width"
+        height <- o .: "height"
+        if col < 1 || row < 1
+            then fail "selector.within.rect uses 1-based col/row coordinates"
+            else
+                if width < 1 || height < 1
+                    then fail "selector.within.rect width/height must be >= 1"
+                    else pure (Rect (col - 1) (row - 1) width height)
 
 requestId :: RPC.JSONRPCRequest -> RPC.RequestId
 requestId (RPC.JSONRPCRequest _ reqId _ _) = reqId
@@ -661,7 +1281,7 @@ resolveAmbiguityOverride maybeRaw =
             case parseAmbiguityMode raw of
                 Just mode -> Right (Just mode)
                 Nothing ->
-                    Left "ambiguityMode must be one of: fail, first, first-visible"
+                    Left "ambiguityMode must be one of: fail, first, first-visible, last, last-visible"
 
 parseAmbiguityMode :: Text -> Maybe AmbiguityMode
 parseAmbiguityMode raw =
@@ -669,6 +1289,8 @@ parseAmbiguityMode raw =
         "fail" -> Just FailOnAmbiguous
         "first" -> Just FirstVisibleMatch
         "first-visible" -> Just FirstVisibleMatch
+        "last" -> Just LastVisibleMatch
+        "last-visible" -> Just LastVisibleMatch
         _ -> Nothing
 
 parseSendKey :: Text -> Either String ([Modifier], Key)
@@ -734,11 +1356,430 @@ parseFunctionKey lowered =
   where
     isDigitAscii c = c >= '0' && c <= '9'
 
+mergeWaitOptions :: WaitOptions -> Maybe Int -> Maybe Int -> WaitOptions
+mergeWaitOptions defaults maybeTimeout maybePoll =
+    defaults
+        { timeoutMs = maybe (timeoutMs defaults) id maybeTimeout
+        , pollIntervalMs = maybe (pollIntervalMs defaults) id maybePoll
+        }
+
+waitUntilPattern :: Tui -> WaitOptions -> Text -> IO ()
+waitUntilPattern tui waitOptions patternText = do
+    start <- getCurrentTime
+    loop start
+  where
+    timeoutLimit = fromIntegral (timeoutMs waitOptions) / 1000 :: NominalDiffTime
+
+    loop :: UTCTime -> IO ()
+    loop startedAt = do
+        viewText <- currentView tui
+        if regexLikeMatch patternText viewText
+            then pure ()
+            else do
+                now <- getCurrentTime
+                if diffUTCTime now startedAt >= timeoutLimit
+                    then throwIO (userError "waitUntil timed out")
+                    else do
+                        threadDelay (pollIntervalMs waitOptions * 1000)
+                        loop startedAt
+
+data CurrentViewFilter
+    = FilterFull
+    | FilterRows Int Int
+    | FilterRegion Int Int Int Int
+    | FilterEntireRow (Maybe Int)
+    | FilterEntireCol (Maybe Int)
+
+resolveCurrentViewFilter :: CurrentViewParams -> Int -> Int -> Either String CurrentViewFilter
+resolveCurrentViewFilter params totalRows totalCols =
+    case length activeFilters of
+        n | n > 1 -> Left "currentView accepts exactly one of: rows, region, entireRow, entireCol"
+        _ ->
+            case activeFilters of
+                [] -> Right FilterFull
+                ["rows"] ->
+                    case currentRowsFilter params of
+                        Nothing -> Right FilterFull
+                        Just rowsFilter -> do
+                            start <- normalizeRowIndex "rows.start" totalRows (currentRowsStart rowsFilter)
+                            end <- normalizeRowIndex "rows.end" totalRows (currentRowsEnd rowsFilter)
+                            if start > end
+                                then Left "rows.start must be <= rows.end"
+                                else Right (FilterRows start end)
+                ["region"] ->
+                    case currentRegionFilter params of
+                        Nothing -> Right FilterFull
+                        Just regionFilter -> resolveRegion regionFilter
+                ["entireRow"] ->
+                    case currentEntireRowFilter params of
+                        Nothing -> Right FilterFull
+                        Just rowValue ->
+                            if rowValue == 0
+                                then Right (FilterEntireRow Nothing)
+                                else
+                                    if rowValue < 0 || rowValue > totalRows
+                                        then Left "entireRow must be 0 or between 1 and total rows"
+                                        else Right (FilterEntireRow (Just rowValue))
+                ["entireCol"] ->
+                    case currentEntireColFilter params of
+                        Nothing -> Right FilterFull
+                        Just colValue ->
+                            if colValue == 0
+                                then Right (FilterEntireCol Nothing)
+                                else
+                                    if colValue < 0 || colValue > totalCols
+                                        then Left "entireCol must be 0 or between 1 and total cols"
+                                        else Right (FilterEntireCol (Just colValue))
+                _ -> Left "invalid currentView filter selection"
+  where
+    activeFilters :: [Text]
+    activeFilters =
+        concat
+            [ maybe [] (const ["rows"]) (currentRowsFilter params)
+            , maybe [] (const ["region"]) (currentRegionFilter params)
+            , maybe [] (const ["entireRow"]) (currentEntireRowFilter params)
+            , maybe [] (const ["entireCol"]) (currentEntireColFilter params)
+            ]
+
+    resolveRegion regionFilter = do
+        let rawCol = currentRegionCol regionFilter
+        let rawRow = currentRegionRow regionFilter
+        let rawWidth = currentRegionWidth regionFilter
+        let rawHeight = currentRegionHeight regionFilter
+
+        startCol <-
+            if rawCol == 0
+                then Right 1
+                else normalizeColIndex "region.col" totalCols rawCol
+
+        startRow <-
+            if rawRow == 0
+                then Right 1
+                else normalizeRowIndex "region.row" totalRows rawRow
+
+        endCol <-
+            if rawCol == 0
+                then Right totalCols
+                else
+                    if rawWidth <= 0
+                        then Left "region.width must be > 0 when region.col is non-zero"
+                        else Right (min totalCols (startCol + rawWidth - 1))
+
+        endRow <-
+            if rawRow == 0
+                then Right totalRows
+                else
+                    if rawHeight <= 0
+                        then Left "region.height must be > 0 when region.row is non-zero"
+                        else Right (min totalRows (startRow + rawHeight - 1))
+
+        if startCol > endCol || startRow > endRow
+            then Left "resolved region is empty"
+            else Right (FilterRegion startCol startRow endCol endRow)
+
+normalizeRowIndex :: String -> Int -> Int -> Either String Int
+normalizeRowIndex label totalRows rawValue =
+    if rawValue == 0
+        then Right 1
+        else
+            if rawValue < 1 || rawValue > totalRows
+                then Left (label <> " must be 0 or between 1 and " <> show totalRows)
+                else Right rawValue
+
+normalizeColIndex :: String -> Int -> Int -> Either String Int
+normalizeColIndex label totalCols rawValue =
+    if rawValue == 0
+        then Right 1
+        else
+            if rawValue < 1 || rawValue > totalCols
+                then Left (label <> " must be 0 or between 1 and " <> show totalCols)
+                else Right rawValue
+
+applyCurrentViewFilter :: CurrentViewFilter -> Int -> Int -> Text -> (Text, Int, Int)
+applyCurrentViewFilter filterValue totalRows totalCols textValue =
+    case filterValue of
+        FilterFull -> renderGrid grid
+        FilterRows start end ->
+            let selected = take (end - start + 1) (drop (start - 1) grid)
+             in renderGrid selected
+        FilterRegion startCol startRow endCol endRow ->
+            let selectedRows = take (endRow - startRow + 1) (drop (startRow - 1) grid)
+                selectedCols = map (sliceColumns startCol endCol) selectedRows
+             in renderGrid selectedCols
+        FilterEntireRow maybeRow ->
+            case maybeRow of
+                Nothing -> renderGrid grid
+                Just rowIdx ->
+                    case safeIndex (rowIdx - 1) grid of
+                        Nothing -> renderGrid []
+                        Just rowText -> renderGrid [rowText]
+        FilterEntireCol maybeCol ->
+            case maybeCol of
+                Nothing -> renderGrid grid
+                Just colIdx ->
+                    let selected = map (sliceColumns colIdx colIdx) grid
+                     in renderGrid selected
+  where
+    grid = normalizeViewportGrid totalRows totalCols textValue
+
+normalizeViewportGrid :: Int -> Int -> Text -> [Text]
+normalizeViewportGrid rows cols textValue =
+    map normalizeLine [0 .. rows - 1]
+  where
+    sourceLines = T.lines textValue
+    padding = T.replicate cols " "
+
+    normalizeLine idx =
+        let sourceLine = fromMaybe "" (safeIndex idx sourceLines)
+         in T.take cols (sourceLine <> padding)
+
+renderGrid :: [Text] -> (Text, Int, Int)
+renderGrid rowsText =
+    let rowCount = length rowsText
+        colCount =
+            case rowsText of
+                [] -> 0
+                rowValue : _ -> T.length rowValue
+     in (T.intercalate "\n" rowsText, rowCount, colCount)
+
+sliceColumns :: Int -> Int -> Text -> Text
+sliceColumns startCol endCol lineText =
+    T.take (endCol - startCol + 1) (T.drop (startCol - 1) lineText)
+
+safeIndex :: Int -> [a] -> Maybe a
+safeIndex idx values
+    | idx < 0 = Nothing
+    | otherwise = go idx values
+  where
+    go _ [] = Nothing
+    go 0 (x : _) = Just x
+    go n (_ : rest) = go (n - 1) rest
+
+renderSnapshotFromDump :: DumpViewParams -> FilePath -> IO FilePath
+renderSnapshotFromDump params ansiPath = do
+    let pngPath = defaultPngPath ansiPath
+    renderAnsiSnapshotFileWithFont
+        (dumpFontPath params)
+        (dumpRows params)
+        (dumpCols params)
+        (dumpTheme params)
+        ansiPath
+        pngPath
+    canonicalizeExistingPath pngPath
+
+renderSnapshotFromRenderView :: RenderViewParams -> FilePath -> IO FilePath
+renderSnapshotFromRenderView params ansiPath = do
+    let pngPath = defaultPngPath ansiPath
+    renderAnsiSnapshotFileWithFont
+        (renderViewFontPath params)
+        (renderViewRows params)
+        (renderViewCols params)
+        (renderViewTheme params)
+        ansiPath
+        pngPath
+    canonicalizeExistingPath pngPath
+
+defaultPngPath :: FilePath -> FilePath
+defaultPngPath ansiPath =
+    if ".ansi.txt" `isSuffixOf` ansiPath
+        then take (length ansiPath - length (".ansi.txt" :: String)) ansiPath <> ".png"
+        else ansiPath <> ".png"
+
+canonicalizeExistingPath :: FilePath -> IO FilePath
+canonicalizeExistingPath path = do
+    exists <- doesFileExist path
+    if exists
+        then canonicalizePath path
+        else pure path
+
 snapshotMetaPath :: FilePath -> FilePath
 snapshotMetaPath ansiPath =
     if ".ansi.txt" `isSuffixOf` ansiPath
         then take (length ansiPath - length (".ansi.txt" :: String)) ansiPath <> ".meta.json"
         else ansiPath <> ".meta.json"
+
+data SnapshotDiffResult = SnapshotDiffResult
+    { diffChanged :: Bool
+    , diffChangedLines :: Int
+    , diffSummary :: Text
+    }
+
+computeSnapshotDiff :: RunOptions -> DiffViewParams -> IO SnapshotDiffResult
+computeSnapshotDiff options params = do
+    leftPath <- canonicalizeExistingPath (diffLeftPath params)
+    rightPath <- canonicalizeExistingPath (diffRightPath params)
+
+    leftExists <- doesFileExist leftPath
+    rightExists <- doesFileExist rightPath
+
+    if not leftExists || not rightExists
+        then
+            throwIO
+                ( userError
+                    ( "diffView requires both paths to exist (left="
+                        <> leftPath
+                        <> ", right="
+                        <> rightPath
+                        <> ")"
+                    )
+                )
+        else do
+            leftComparable <- loadComparableSnapshot options (diffMode params) leftPath
+            rightComparable <- loadComparableSnapshot options (diffMode params) rightPath
+            let changed = leftComparable /= rightComparable
+            let changedLineCount = lineDifferenceCount leftComparable rightComparable
+            let summary =
+                    if changed
+                        then
+                            "Snapshots differ ("
+                                <> T.pack (show changedLineCount)
+                                <> " changed lines)"
+                        else "Snapshots are identical"
+            pure
+                SnapshotDiffResult
+                    { diffChanged = changed
+                    , diffChangedLines = changedLineCount
+                    , diffSummary = summary
+                    }
+
+loadComparableSnapshot :: RunOptions -> DiffMode -> FilePath -> IO Text
+loadComparableSnapshot options mode path = do
+    ansiText <- TIO.readFile path
+    (rows, cols) <- loadSnapshotDimensions path options
+    case mode of
+        DiffText -> pure (renderAnsiViewportText rows cols ansiText)
+        DiffStyled -> pure (T.pack (serializeAnsiSnapshot rows cols (snapshotTheme options) ansiText))
+
+loadSnapshotDimensions :: FilePath -> RunOptions -> IO (Int, Int)
+loadSnapshotDimensions path options = do
+    let metaPath = snapshotMetaPath path
+    metaExists <- doesFileExist metaPath
+    if not metaExists
+        then pure (terminalRows options, terminalCols options)
+        else do
+            metaBytes <- BL.readFile metaPath
+            case eitherDecode metaBytes of
+                Left _ -> pure (terminalRows options, terminalCols options)
+                Right meta -> pure (snapshotMetaRows meta, snapshotMetaCols meta)
+
+data SnapshotMeta = SnapshotMeta
+    { snapshotMetaRows :: Int
+    , snapshotMetaCols :: Int
+    }
+
+instance FromJSON SnapshotMeta where
+    parseJSON =
+        withObject "SnapshotMeta" $ \o ->
+            SnapshotMeta
+                <$> o .: "rows"
+                <*> o .: "cols"
+
+lineDifferenceCount :: Text -> Text -> Int
+lineDifferenceCount left right =
+    go 0 leftLines rightLines
+  where
+    leftLines = T.lines left
+    rightLines = T.lines right
+
+    go count [] [] = count
+    go count (l : ls) [] = go (if T.null l then count else count + 1) ls []
+    go count [] (r : rs) = go (if T.null r then count else count + 1) [] rs
+    go count (l : ls) (r : rs) =
+        go
+            (if l == r then count else count + 1)
+            ls
+            rs
+
+emitViewChangedNotification :: ServerState -> Tui -> IO ()
+emitViewChangedNotification state tui = do
+    maybeSubscription <- readIORef (stateViewSubscription state)
+    case maybeSubscription of
+        Nothing -> pure ()
+        Just subscription -> do
+            nowMicros <- currentMicros
+            textValue <- currentView tui
+            let changedSinceLast = maybe True (/= textValue) (subscriptionLastView subscription)
+            let debounceMicros = fromIntegral (subscriptionDebounceMs subscription) * 1000
+            let pastDebounce =
+                    case subscriptionLastSentMicros subscription of
+                        Nothing -> True
+                        Just lastSent -> nowMicros - lastSent >= debounceMicros
+            let updatedSubscription = subscription{subscriptionLastView = Just textValue}
+            if changedSinceLast && pastDebounce
+                then do
+                    let options = tuiOptions tui
+                    let payloadBase =
+                            [ "rows" .= terminalRows options
+                            , "cols" .= terminalCols options
+                            ]
+                    let payload =
+                            if subscriptionIncludeText subscription
+                                then object (payloadBase <> ["text" .= textValue])
+                                else object payloadBase
+                    _ <- writeNotification state "view.changed" payload
+                    writeIORef
+                        (stateViewSubscription state)
+                        (Just updatedSubscription{subscriptionLastSentMicros = Just nowMicros})
+                else
+                    writeIORef (stateViewSubscription state) (Just updatedSubscription)
+
+currentMicros :: IO Int64
+currentMicros = do
+    now <- getPOSIXTime
+    pure (floor (now * 1000000))
+
+replayRecordedRequestLine :: ServerState -> Text -> IO ()
+replayRecordedRequestLine state lineText =
+    case eitherDecodeStrict' (TE.encodeUtf8 lineText) :: Either String RPC.JSONRPCRequest of
+        Left parseErr ->
+            throwIO (userError ("replay failed to parse request line: " <> parseErr))
+        Right request ->
+            if requestMethod request == "server.shutdown"
+                then pure ()
+                else case validateRequestVersion request of
+                    Left err ->
+                        throwIO (userError ("replay request rejected: " <> T.unpack (failureMessage err)))
+                    Right () -> do
+                        outcome <- dispatchMethod state (requestMethod request) (requestParams request)
+                        case outcome of
+                            Left failure ->
+                                throwIO
+                                    ( userError
+                                        ( "replay step failed ("
+                                            <> T.unpack (requestMethod request)
+                                            <> "): "
+                                            <> T.unpack (failureMessage failure)
+                                        )
+                                    )
+                            Right _ -> pure ()
+
+regexLikeMatch :: Text -> Text -> Bool
+regexLikeMatch patternText haystack =
+    any (`wildcardContains` haystack) alternatives
+  where
+    alternatives =
+        filter (not . T.null) $
+            map cleanPattern (T.splitOn "|" patternText)
+
+cleanPattern :: Text -> Text
+cleanPattern = T.filter (`notElem` ("()" :: String))
+
+wildcardContains :: Text -> Text -> Bool
+wildcardContains patternText haystack =
+    checkSegments 0 segments
+  where
+    segments = filter (not . T.null) (T.splitOn ".*" patternText)
+
+    checkSegments :: Int -> [Text] -> Bool
+    checkSegments _ [] = True
+    checkSegments fromIdx (segment : rest) =
+        let remaining = T.drop fromIdx haystack
+            (prefix, suffix) = T.breakOn segment remaining
+         in if T.null suffix
+                then False
+                else
+                    let nextStart = fromIdx + T.length prefix + T.length segment
+                     in checkSegments nextStart rest
 
 safeSnapshotStem :: String -> String
 safeSnapshotStem input =
