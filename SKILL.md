@@ -136,7 +136,9 @@ Both commands auto-read rows/cols from `.meta.json`.
 
 ## JSONRPC server workflow
 
-You can also orchestrate a TUI from an external client using:
+You can also orchestrate a TUI from an external client using the JSON-RPC
+server. See [`SERVER.md`](SERVER.md) for the full protocol reference
+(all methods, params, result shapes, error codes, and selector encoding).
 
 ```bash
 cabal run tuispec -- server --artifact-dir artifacts/server
@@ -146,15 +148,6 @@ cabal run tuispec -- server --artifact-dir artifacts/server
 
 - Send one JSON-RPC request per line on stdin.
 - Read one JSON-RPC response per line on stdout.
-
-### Shutdown semantics
-
-- `server.shutdown` is a hard shutdown:
-  - kills active TUI child process group with `SIGKILL`
-  - exits server immediately (no graceful wait)
-- On `SIGHUP`, the server does the same hard shutdown behavior:
-  - `SIGKILL` to active child process group
-  - immediate process exit
 
 ### Example session
 
