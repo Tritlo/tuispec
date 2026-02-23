@@ -1,5 +1,12 @@
 {-# LANGUAGE OverloadedStrings #-}
 
+{- |
+Module      : TuiSpec.Server
+Description : JSON-RPC 2.0 server for interactive TUI orchestration.
+
+Runs a newline-delimited JSON-RPC server on stdin\/stdout, allowing
+external tools to drive TUI sessions programmatically.
+-}
 module TuiSpec.Server (
     ServerOptions (..),
     runServer,
@@ -27,14 +34,20 @@ import System.IO.Error (isEOFError, tryIOError)
 import System.Posix.Process (exitImmediately)
 import System.Posix.Signals (Handler (Catch), installHandler, sigHUP)
 import TuiSpec.Runner (currentView, defaultWaitOptionsFor, dumpView, expectNotVisible, expectSnapshot, expectVisible, killSessionChildrenNow, launch, openSession, press, pressCombo, sendLine, typeText, waitForSelector)
-import TuiSpec.Types (AmbiguityMode (FailOnAmbiguous, FirstVisibleMatch), App (App), Key (..), Modifier (AltModifier, Control, Shift), Rect (Rect), RunOptions (..), Selector (..), SnapshotName (SnapshotName), Tui (..), WaitOptions (..), defaultRunOptions)
+import TuiSpec.Types (AmbiguityMode (FailOnAmbiguous, FirstVisibleMatch), App (App), Key (..), Modifier (Alt, Control, Shift), Rect (Rect), RunOptions (..), Selector (..), SnapshotName (SnapshotName), Tui (..), WaitOptions (..), defaultRunOptions)
 
+-- | Configuration for the JSON-RPC server.
 data ServerOptions = ServerOptions
     { serverArtifactsDir :: FilePath
+    -- ^ Base directory for session artifacts.
     , serverTerminalCols :: Int
+    -- ^ Default terminal columns for launched sessions.
     , serverTerminalRows :: Int
+    -- ^ Default terminal rows for launched sessions.
     , serverTimeoutSeconds :: Int
+    -- ^ Default timeout for wait operations.
     , serverAmbiguityMode :: AmbiguityMode
+    -- ^ Default ambiguity mode for selector assertions.
     }
     deriving (Eq, Show)
 
@@ -57,6 +70,7 @@ data RpcFailure = RpcFailure
     , failureData :: Maybe Value
     }
 
+-- | Run the JSON-RPC server, reading requests from stdin and writing responses to stdout.
 runServer :: ServerOptions -> IO ()
 runServer options = do
     sessionRef <- newIORef Nothing
@@ -653,7 +667,7 @@ parseSendKey rawKey =
         case map toLower (T.unpack textValue) of
             "ctrl" -> Right Control
             "control" -> Right Control
-            "alt" -> Right AltModifier
+            "alt" -> Right Alt
             "shift" -> Right Shift
             _ -> Left ("unknown modifier: " <> T.unpack textValue)
 

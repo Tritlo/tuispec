@@ -669,7 +669,7 @@ comboToPtyText modifiers key
         case (modifiers, key) of
             ([Control], CharKey c) ->
                 keyToPtyText (Ctrl c)
-            ([AltModifier], CharKey c) ->
+            ([Alt], CharKey c) ->
                 keyToPtyText (AltKey c)
             ([Shift], CharKey c) ->
                 keyToPtyText (CharKey (toUpperAscii c))

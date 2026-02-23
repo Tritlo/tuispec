@@ -144,7 +144,7 @@ Ambiguity mode:
 
 `pressCombo` supports current mappings:
 - `[Control] + CharKey c`
-- `[AltModifier] + CharKey c`
+- `[Alt] + CharKey c`
 - `[Shift] + CharKey c`
 
 ### 4.7 Snapshot DSL

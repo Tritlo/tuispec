@@ -93,7 +93,7 @@ defaultRunOptions =
 -- | Key modifiers for combo key presses.
 data Modifier
     = Control
-    | AltModifier
+    | Alt
     | Shift
     deriving (Eq, Show, Read)
 
