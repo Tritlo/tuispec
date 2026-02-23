@@ -1,6 +1,6 @@
-# `tuispec server` Plan
+# `tuispec server` Reference
 
-This document captures the agreed plan for implementing a JSONRPC server in `tuispec`.
+This document describes the implemented `tuispec server` JSON-RPC behavior.
 
 ## Goals
 
@@ -146,7 +146,15 @@ Defaults:
 - `server.shutdown`
   - result:
     - `shuttingDown: true`
-  - then exit process (no explicit session teardown)
+  - then hard-shutdown:
+    - send `SIGKILL` to active child process group
+    - exit process immediately (no graceful wait)
+
+## Signal behavior
+
+- On `SIGHUP`, server does hard-shutdown:
+  - send `SIGKILL` to active child process group
+  - exit immediately
 
 ## Selector Encoding
 
@@ -194,19 +202,6 @@ With `--artifact-dir X` and session `foo`:
 
 `dumpView` writes only run artifacts.  
 `expectSnapshot` keeps existing DSL baseline semantics unless changed later.
-
-## Implementation Units
-
-1. Add module `src/TuiSpec/Server.hs`:
-   - JSONRPC request decode
-   - method dispatch
-   - session state (`IORef (Maybe ActiveSession)`)
-2. Update `app/Main.hs`:
-   - add `server` subcommand and options
-3. Update `tuispec.cabal`:
-   - add `jsonrpc` dependency
-4. Update `SKILL.md`:
-   - add JSONRPC server usage examples and workflow
 
 ## Validation
 

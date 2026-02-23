@@ -31,6 +31,54 @@ cd example
 cabal test
 ```
 
+## JSON-RPC server
+
+Run the interactive server:
+
+```bash
+cabal run tuispec -- server --artifact-dir artifacts/server
+```
+
+Transport:
+- JSON-RPC 2.0
+- newline-delimited JSON messages
+- read requests from stdin, write responses to stdout
+
+Core methods:
+- `initialize`
+- `launch`
+- `sendKey`
+- `sendText`
+- `sendLine`
+- `currentView`
+- `dumpView`
+- `expectVisible`
+- `expectNotVisible`
+- `waitForText`
+- `expectSnapshot`
+- `server.ping`
+- `server.shutdown`
+
+Example:
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"name":"demo"}}
+{"jsonrpc":"2.0","id":2,"method":"launch","params":{"command":"sh","args":[]}}
+{"jsonrpc":"2.0","id":3,"method":"sendLine","params":{"text":"echo hello"}}
+{"jsonrpc":"2.0","id":4,"method":"dumpView","params":{"name":"after-echo"}}
+{"jsonrpc":"2.0","id":5,"method":"server.shutdown","params":null}
+```
+
+Server artifacts for session `demo`:
+- `artifacts/server/sessions/demo/snapshots/<name>.ansi.txt`
+- `artifacts/server/sessions/demo/snapshots/<name>.meta.json`
+
+Shutdown behavior:
+- `server.shutdown` performs hard shutdown: sends `SIGKILL` to active child process group and exits immediately.
+- `SIGHUP` does the same hard shutdown behavior.
+
+Detailed protocol notes: `SERVER.md`
+
 ## Snapshot layout
 
 For a test named `my test` (slug: `my-test`) and `artifactsDir = "artifacts"`:
