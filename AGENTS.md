@@ -21,6 +21,13 @@ When changing Haskell or cabal files:
    - `cabal-gild -i tuispec.cabal`
 3. Build:
    - `cabal build`
+4. Check package:
+   - `cabal check`
+5. Verify Haddock builds for Hackage:
+   - `cabal haddock --haddock-for-hackage`
+
+## Coding Conventions
+- All exported functions and data types must have Haddock documentation comments (`-- |`).
 
 ## Useful Test Commands
 - Smoke test:

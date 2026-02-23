@@ -44,7 +44,7 @@ import System.IO.Error (isEOFError, tryIOError)
 import System.Posix.Process (exitImmediately)
 import System.Posix.Signals (Handler (Catch), installHandler, sigHUP)
 import TuiSpec.Render (renderAnsiSnapshotFileWithFont)
-import TuiSpec.Replay (RecordingDirection (DirectionNotification, DirectionRequest, DirectionResponse), RecordingHandle, ReplaySpeed (ReplayAsFastAsPossible, ReplayRealTime), appendRecordingEvent, closeRecording, openRecording, readRecordingEvents, replayRecordedRequests)
+import TuiSpec.Replay (RecordingDirection (DirectionNotification, DirectionRequest, DirectionResponse), RecordingHandle, ReplaySpeed (ReplayAsFastAsPossible, ReplayRealTime), appendRecordingEvent, closeRecording, openRecording, streamReplayRequests)
 import TuiSpec.Runner (currentView, defaultWaitOptionsFor, dumpView, expectNotVisible, expectSnapshot, expectVisible, killSessionChildrenNow, launch, openSession, press, pressCombo, renderAnsiViewportText, sendLine, serializeAnsiSnapshot, typeText, waitForSelectorWithAmbiguity)
 import TuiSpec.Types (AmbiguityMode (FailOnAmbiguous, FirstVisibleMatch, LastVisibleMatch), App (..), Key (..), Modifier (Alt, Control, Shift), Rect (Rect), RunOptions (..), Selector (..), SnapshotName (SnapshotName), Tui (..), WaitOptions (..), defaultRunOptions, tuispecVersion)
 
@@ -593,11 +593,10 @@ dispatchReplay state paramsValue =
         Left err -> pure (Left err)
         Right params ->
             runMethod $ do
-                events <- readRecordingEvents (replayPath params)
                 replayed <-
-                    replayRecordedRequests
+                    streamReplayRequests
                         (replaySpeed params)
-                        events
+                        (replayPath params)
                         (replayRecordedRequestLine state)
                 pure
                     ( object

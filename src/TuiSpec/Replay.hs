@@ -15,12 +15,11 @@ module TuiSpec.Replay (
     appendRecordingEvent,
     closeRecording,
     openRecording,
-    readRecordingEvents,
-    replayRecordedRequests,
+    streamReplayRequests,
 ) where
 
 import Control.Concurrent (threadDelay)
-import Control.Exception (Exception, throwIO)
+import Control.Exception (Exception, bracket, throwIO)
 import Control.Monad (when)
 import Data.Aeson (FromJSON (parseJSON), ToJSON (toJSON), eitherDecodeStrict', encode, object, withObject, (.:), (.=))
 import Data.ByteString.Char8 qualified as BS8
@@ -81,7 +80,7 @@ instance FromJSON RecordingEvent where
                 <*> o .: "direction"
                 <*> o .: "line"
 
--- | Replay speed used by @replayRecordedRequests@.
+-- | Replay speed used by @streamReplayRequests@.
 data ReplaySpeed
     = ReplayAsFastAsPossible
     | ReplayRealTime
@@ -126,52 +125,43 @@ appendRecordingEvent handle direction lineValue = do
     hPutStrLn (recordingOutputHandle handle) (toJsonLine event)
     hFlush (recordingOutputHandle handle)
 
--- | Read all events from a JSONL recording file.
-readRecordingEvents :: FilePath -> IO [RecordingEvent]
-readRecordingEvents path = do
-    handle <- openFile path ReadMode
-    events <- go handle (1 :: Int) []
-    hClose handle
-    pure (reverse events)
+{- | Stream replay of request events directly from a JSONL recording file,
+avoiding loading all events into memory at once. Each request line is
+parsed and dispatched to the callback one at a time. Returns the total
+number of request events replayed.
+-}
+streamReplayRequests :: ReplaySpeed -> FilePath -> (Text -> IO ()) -> IO Int
+streamReplayRequests speed path runRequest =
+    bracket (openFile path ReadMode) hClose $ \handle ->
+        go handle (1 :: Int) Nothing 0
   where
-    go handle lineNumber acc = do
+    go handle lineNumber maybePrev !count = do
         eof <- hIsEOF handle
         if eof
-            then pure acc
+            then pure count
             else do
                 lineValue <- BS8.hGetLine handle
                 let trimmed = TE.decodeUtf8 lineValue
                 if T.null (T.strip trimmed)
-                    then go handle (lineNumber + 1) acc
+                    then go handle (lineNumber + 1) maybePrev count
                     else case eitherDecodeStrict' lineValue of
                         Left err ->
                             throwIO
                                 (RecordingParseError path ("line " <> show lineNumber <> ": " <> err))
-                        Right event ->
-                            go handle (lineNumber + 1) (event : acc)
-
--- | Replay recorded request lines, optionally preserving recorded timing.
-replayRecordedRequests :: ReplaySpeed -> [RecordingEvent] -> (Text -> IO ()) -> IO Int
-replayRecordedRequests speed events runRequest = do
-    let requestEvents = filter ((== DirectionRequest) . recordingDirection) events
-    case requestEvents of
-        [] -> pure 0
-        _ -> do
-            go Nothing requestEvents
-            pure (length requestEvents)
-  where
-    go _ [] = pure ()
-    go maybePrev (event : rest) = do
-        case speed of
-            ReplayAsFastAsPossible -> pure ()
-            ReplayRealTime ->
-                case maybePrev of
-                    Nothing -> pure ()
-                    Just prev -> do
-                        let delta = recordingTimestampMicros event - recordingTimestampMicros prev
-                        when (delta > 0) $ threadDelay (fromIntegral delta)
-        runRequest (recordingLine event)
-        go (Just event) rest
+                        Right event
+                            | recordingDirection event == DirectionRequest -> do
+                                case speed of
+                                    ReplayAsFastAsPossible -> pure ()
+                                    ReplayRealTime ->
+                                        case maybePrev of
+                                            Nothing -> pure ()
+                                            Just prev -> do
+                                                let delta = recordingTimestampMicros event - recordingTimestampMicros prev
+                                                when (delta > 0) $ threadDelay (fromIntegral delta)
+                                runRequest (recordingLine event)
+                                go handle (lineNumber + 1) (Just event) (count + 1)
+                            | otherwise ->
+                                go handle (lineNumber + 1) maybePrev count
 
 toJsonLine :: RecordingEvent -> String
 toJsonLine = T.unpack . TE.decodeUtf8 . BL.toStrict . encode

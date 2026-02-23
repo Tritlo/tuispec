@@ -7,7 +7,7 @@ import Options.Applicative
 import Paths_tuispec (version)
 import Text.Read (readMaybe)
 import TuiSpec.Render (renderAnsiSnapshotFileWithFont, renderAnsiSnapshotTextFile)
-import TuiSpec.Replay (ReplaySpeed (ReplayAsFastAsPossible, ReplayRealTime), readRecordingEvents, replayRecordedRequests)
+import TuiSpec.Replay (ReplaySpeed (ReplayAsFastAsPossible, ReplayRealTime), streamReplayRequests)
 import TuiSpec.Server qualified as Server
 import TuiSpec.Types (AmbiguityMode (FailOnAmbiguous, FirstVisibleMatch, LastVisibleMatch))
 
@@ -72,8 +72,7 @@ runCommand parsedCommand =
                     , Server.serverAmbiguityMode = ambiguity options
                     }
         Replay options -> do
-            events <- readRecordingEvents (replayInputPath options)
-            replayed <- replayRecordedRequests (replaySpeed options) events TIO.putStrLn
+            replayed <- streamReplayRequests (replaySpeed options) (replayInputPath options) TIO.putStrLn
             putStrLn ("Replayed " <> show replayed <> " request messages")
 
 commandParserInfo :: ParserInfo Command
