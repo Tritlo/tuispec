@@ -35,7 +35,7 @@ module TuiSpec.Runner (
 
 import Control.Concurrent (threadDelay)
 import Control.Exception (Exception, SomeException, catch, displayException, finally, throwIO, toException, try)
-import Control.Monad (unless, void, when)
+import Control.Monad (unless, when)
 import Data.Aeson (encode, object, (.=))
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
@@ -43,7 +43,7 @@ import Data.Char (chr, isAlphaNum, ord, toLower)
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import Data.IntMap.Strict qualified as IM
 import Data.List (intercalate, isSuffixOf, nub, sort)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
@@ -57,7 +57,7 @@ import System.Posix.Process (getProcessGroupIDOf)
 import System.Posix.Pty qualified as Pty
 import System.Posix.Signals (sigKILL, signalProcess, signalProcessGroup)
 import System.Posix.Types (ProcessGroupID)
-import System.Process (getPid, terminateProcess, waitForProcess)
+import System.Process (ProcessHandle, getPid, getProcessExitCode, terminateProcess)
 import System.Timeout (timeout)
 import Test.Tasty (TestTree)
 import Test.Tasty.HUnit (assertFailure, testCase)
@@ -269,6 +269,7 @@ waitForSelector tui waitOptions selector = do
     viewport <- currentViewport tui
     assertNotAmbiguous tui selector viewport
 
+-- | Derive default wait settings for a TUI from its configured run options.
 defaultWaitOptionsFor :: Tui -> WaitOptions
 defaultWaitOptionsFor tui =
     defaultWaitOptions
@@ -520,16 +521,29 @@ teardownTui tui =
 terminatePtyHandle :: PtyHandle -> IO ()
 terminatePtyHandle ptyHandle = do
     _ <- timeout (500 * 1000) (ignoreIOError (terminateProcess (ptyProcess ptyHandle)))
-    waitResult <- timeout (500 * 1000) (ignoreIOError (void (waitForProcess (ptyProcess ptyHandle))))
-    case waitResult of
-        Just () ->
-            pure ()
-        Nothing -> do
-            killPtyProcessGroupNow ptyHandle
-            _ <- timeout (500 * 1000) (ignoreIOError (void (waitForProcess (ptyProcess ptyHandle))))
-            pure ()
+    exitedAfterTerminate <- waitForProcessExitWithin (500 * 1000) (ptyProcess ptyHandle)
+    unless exitedAfterTerminate $ do
+        killPtyProcessGroupNow ptyHandle
+        _ <- waitForProcessExitWithin (500 * 1000) (ptyProcess ptyHandle)
+        pure ()
     _ <- timeout (500 * 1000) (ignoreIOError (Pty.closePty (ptyMaster ptyHandle)))
     pure ()
+
+waitForProcessExitWithin :: Int -> ProcessHandle -> IO Bool
+waitForProcessExitWithin timeoutMicros processHandle =
+    go (max 1 (timeoutMicros `div` pollMicros))
+  where
+    pollMicros = 20 * 1000
+
+    go 0 = isJust <$> getProcessExitCode processHandle
+    go remaining = do
+        status <- getProcessExitCode processHandle
+        case status of
+            Just _ ->
+                pure True
+            Nothing -> do
+                threadDelay pollMicros
+                go (remaining - 1)
 
 killPtyProcessGroupNow :: PtyHandle -> IO ()
 killPtyProcessGroupNow ptyHandle = do

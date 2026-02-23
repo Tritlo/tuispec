@@ -108,6 +108,9 @@ Within Rect Selector  -- restrict to a rectangle
 Nth    Int Selector   -- pick the Nth match
 ```
 
+`waitForText`/selector matching runs against the rendered viewport text
+(after ANSI control/style escapes are interpreted), not raw escape bytes.
+
 ### Keys
 
 Named keys: `Enter`, `Esc`, `Tab`, `Backspace`, arrows, `FunctionKey 1..12`

@@ -14,7 +14,7 @@ main =
     [ tuiTest defaultRunOptions "my test" $ \\tui -> do
         launch tui (app "my-app" [])
         waitForText tui (Exact "Ready")
-        press tui (CharKey 'q')
+        press tui Enter
     ]
 @
 

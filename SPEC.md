@@ -117,6 +117,7 @@ Behavior:
 - polling-based
 - default poll interval: `100ms`
 - `waitForText` / `expectVisible` use `timeoutSeconds` from `RunOptions`
+- matching runs on rendered viewport text (ANSI control/style escapes are interpreted)
 - ambiguity checking runs after positive selector match
 
 ### 4.5 Selector language

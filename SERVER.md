@@ -134,6 +134,8 @@ Launch env behavior:
     - `selector`
     - optional `timeoutMs`
     - optional `pollIntervalMs`
+  - behavior:
+    - matches on rendered viewport text (ANSI control/style escapes are interpreted)
 
 - `expectSnapshot`
   - params:

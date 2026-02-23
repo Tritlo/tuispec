@@ -61,4 +61,19 @@ main =
                         waitForText tui (Exact "hello-env")
                         sendLine tui "exit"
                     )
+            , testCase "smoke: waitForText ignores ANSI escape sequences" $
+                withTuiSession
+                    defaultRunOptions
+                        { timeoutSeconds = 8
+                        , artifactsDir = "artifacts/repl-ansi-smoke"
+                        , ambiguityMode = FirstVisibleMatch
+                        }
+                    "ansi-session"
+                    ( \tui -> do
+                        launch tui (app "sh" [])
+                        sendLine tui "printf '\\033[31mstyled text\\033[0m\\n'"
+                        waitForText tui (Exact "styled text")
+                        expectNotVisible tui (Exact "\ESC[31mstyled text\ESC[0m")
+                        sendLine tui "exit"
+                    )
             ]

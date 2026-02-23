@@ -48,6 +48,11 @@ renderAnsiSnapshotFile :: Maybe Int -> Maybe Int -> Maybe String -> FilePath -> 
 renderAnsiSnapshotFile rowOverride colOverride themeOverride ansiPath outPath = do
     renderAnsiSnapshotFileWithFont Nothing rowOverride colOverride themeOverride ansiPath outPath
 
+{- | Render an ANSI snapshot file to PNG with an optional explicit font path.
+
+If no font is supplied, renderer defaults are used and may fall back to the
+built-in terminal-safe font list.
+-}
 renderAnsiSnapshotFileWithFont :: Maybe FilePath -> Maybe Int -> Maybe Int -> Maybe String -> FilePath -> FilePath -> IO ()
 renderAnsiSnapshotFileWithFont maybeFontPath rowOverride colOverride themeOverride ansiPath outPath = do
     ansiText <- TIO.readFile ansiPath

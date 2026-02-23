@@ -338,7 +338,7 @@ dispatchPing request =
                     ( Continue
                         ( object
                             [ "pong" .= True
-                            , "version" .= ("0.1.1.0" :: String)
+                            , "version" .= ("0.1.1.1" :: String)
                             ]
                         )
                     )
