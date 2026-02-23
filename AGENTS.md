@@ -25,4 +25,4 @@ When changing Haskell or cabal files:
 - Smoke test:
   - `cabal test`
 - Brick demo suite:
-  - `CABAL_DIR=$PWD/.cabal cabal run tuitest -- run test/BrickDemoSpec.hs`
+  - `cd example && cabal test`

@@ -168,6 +168,7 @@ data TuiState = TuiState
 data Tui = Tui
     { tuiName :: String
     , tuiOptions :: RunOptions
+    , tuiRootDir :: FilePath
     , tuiTestRoot :: FilePath
     , tuiSnapshotRoot :: FilePath
     , tuiPty :: IORef (Maybe PtyHandle)

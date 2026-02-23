@@ -21,3 +21,17 @@ executable tui-demo
         brick >=2.4,
         mtl >=2.2,
         vty >=6.0
+
+test-suite tui-demo-integration
+    import: common-settings
+    type: exitcode-stdio-1.0
+    hs-source-dirs: test
+    main-is: IntegrationSpec.hs
+    build-tool-depends:
+        tui-demo:tui-demo
+    build-depends:
+        base >=4.16 && <5,
+        tasty >=1.4,
+        tasty-hunit >=0.10,
+        text >=1.2,
+        tuispec

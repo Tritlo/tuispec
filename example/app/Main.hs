@@ -43,12 +43,6 @@ data Split
     | HorizontalSplit
     deriving (Eq, Show)
 
-data Theme
-    = Ocean
-    | Amber
-    | Mono
-    deriving (Eq, Show)
-
 data Task = Task
     { taskLabel :: String
     , taskDone :: Bool
@@ -59,7 +53,6 @@ data St = St
     { screenMode :: Screen
     , focusPane :: Pane
     , splitMode :: Split
-    , themeMode :: Theme
     , helpOpen :: Bool
     , commandOpen :: Bool
     , commandInput :: String
@@ -81,7 +74,6 @@ initialState =
         { screenMode = Dashboard
         , focusPane = MainPane
         , splitMode = VerticalSplit
-        , themeMode = Ocean
         , helpOpen = False
         , commandOpen = False
         , commandInput = ""
@@ -143,7 +135,6 @@ statusBar st =
         hBox
             [ withAttr (attrName "accent") (str ("focus=" <> renderPane (focusPane st)))
             , padLeftRight 1 (str ("split=" <> renderSplit (splitMode st)))
-            , padLeftRight 1 (str ("theme=" <> renderTheme (themeMode st)))
             , padLeftRight 1 (str ("counter=" <> show (counter st)))
             , padLeftRight 1 (str ("ticket=" <> show (ticketCursor st)))
             , fill ' '
@@ -190,7 +181,7 @@ mainPane st =
                     [ str "Agent Readiness"
                     , str ("Open tasks: " <> show (length (filter (not . taskDone) (tasks st))))
                     , str ("Done tasks: " <> show (length (filter taskDone (tasks st))))
-                    , str "Keys: + / - adjust counter, t theme, / command palette"
+                    , str "Keys: + / - adjust counter, / command palette"
                     ]
             Board ->
                 vBox
@@ -206,7 +197,6 @@ inspectorPane st =
         vBox
             [ str ("Current screen: " <> renderScreen (screenMode st))
             , str ("Focused pane: " <> renderPane (focusPane st))
-            , str ("Theme: " <> renderTheme (themeMode st))
             , str ("Counter: " <> show (counter st))
             , str ("Ticket cursor: " <> show (ticketCursor st))
             , str ""
@@ -248,7 +238,7 @@ helpBlock st
     | otherwise =
         borderWithLabel (str "Help") $
             vBox
-                [ str "Global: q quit, tab next pane, s split, t theme, ? help"
+                [ str "Global: q quit, tab next pane, s split, ? help"
                 , str "Screens: g dashboard, b board, l logs"
                 , str "Board: j/k move, space toggle task"
                 , str "Inspector: left/right ticket cursor"
@@ -268,7 +258,6 @@ handleNormalEvent eventValue =
         VtyEvent (V.EvKey (V.KChar 'q') []) -> halt
         VtyEvent (V.EvKey (V.KChar '\t') []) -> updateAndEmit (\st -> st{focusPane = nextPane (focusPane st)}) "focus cycled"
         VtyEvent (V.EvKey (V.KChar 's') []) -> updateAndEmit (\st -> st{splitMode = toggleSplit (splitMode st)}) "split toggled"
-        VtyEvent (V.EvKey (V.KChar 't') []) -> updateAndEmit (\st -> st{themeMode = nextTheme (themeMode st)}) "theme changed"
         VtyEvent (V.EvKey (V.KChar '?') []) -> updateAndEmit (\st -> st{helpOpen = not (helpOpen st)}) "help toggled"
         VtyEvent (V.EvKey (V.KChar '/') []) -> updateAndEmit (\st -> st{commandOpen = True, commandInput = ""}) "command opened"
         VtyEvent (V.EvKey (V.KChar 'g') []) -> updateAndEmit (\st -> st{screenMode = Dashboard}) "screen dashboard"
@@ -327,9 +316,6 @@ applyCommand rawInput st =
             ["screen", "logs"] -> st{screenMode = LogsScreen}
             ["split", "vertical"] -> st{splitMode = VerticalSplit}
             ["split", "horizontal"] -> st{splitMode = HorizontalSplit}
-            ["theme", "ocean"] -> st{themeMode = Ocean}
-            ["theme", "amber"] -> st{themeMode = Amber}
-            ["theme", "mono"] -> st{themeMode = Mono}
             ["quit"] -> st
             _ -> st
 
@@ -365,11 +351,6 @@ toggleSplit :: Split -> Split
 toggleSplit VerticalSplit = HorizontalSplit
 toggleSplit HorizontalSplit = VerticalSplit
 
-nextTheme :: Theme -> Theme
-nextTheme Ocean = Amber
-nextTheme Amber = Mono
-nextTheme Mono = Ocean
-
 chooseCursor :: St -> [CursorLocation Name] -> Maybe (CursorLocation Name)
 chooseCursor _ _ = Nothing
 
@@ -398,11 +379,6 @@ renderPane InspectPane = "inspect"
 renderSplit :: Split -> String
 renderSplit VerticalSplit = "vertical"
 renderSplit HorizontalSplit = "horizontal"
-
-renderTheme :: Theme -> String
-renderTheme Ocean = "ocean"
-renderTheme Amber = "amber"
-renderTheme Mono = "mono"
 
 takeLast :: Int -> [a] -> [a]
 takeLast count values
