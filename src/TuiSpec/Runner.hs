@@ -27,6 +27,7 @@ module TuiSpec.Runner (
     typeText,
     killSessionChildrenNow,
     waitForSelector,
+    waitForSelectorWithAmbiguity,
     defaultWaitOptionsFor,
     withTuiSession,
     waitFor,
@@ -265,9 +266,19 @@ waitForText tui selector = do
 -- | Wait for a selector with explicit wait options and ambiguity handling.
 waitForSelector :: Tui -> WaitOptions -> Selector -> IO ()
 waitForSelector tui waitOptions selector = do
+    waitForSelectorWithAmbiguity tui waitOptions Nothing selector
+
+-- | Wait for a selector with explicit wait and optional ambiguity mode override.
+waitForSelectorWithAmbiguity :: Tui -> WaitOptions -> Maybe AmbiguityMode -> Selector -> IO ()
+waitForSelectorWithAmbiguity tui waitOptions ambiguityOverride selector = do
     waitFor tui waitOptions (selectorMatches selector)
     viewport <- currentViewport tui
-    assertNotAmbiguous tui selector viewport
+    assertNotAmbiguousWithMode (tuiName tui) effectiveMode selector viewport
+  where
+    effectiveMode =
+        case ambiguityOverride of
+            Just overrideMode -> overrideMode
+            Nothing -> ambiguityMode (tuiOptions tui)
 
 -- | Derive default wait settings for a TUI from its configured run options.
 defaultWaitOptionsFor :: Tui -> WaitOptions
@@ -479,12 +490,13 @@ initializePty rows cols appSpec = do
 startPty :: Int -> Int -> App -> IO PtyHandle
 startPty rows cols appSpec = do
     processEnv <- withTerminalEnv (env appSpec)
+    let (effectiveCommand, effectiveArgs) = wrapLaunchWithCwd appSpec
     (master, processHandle) <-
         Pty.spawnWithPty
             (Just processEnv)
             True
-            (command appSpec)
-            (args appSpec)
+            effectiveCommand
+            effectiveArgs
             (cols, rows)
     pure
         PtyHandle
@@ -492,7 +504,7 @@ startPty rows cols appSpec = do
             , ptyProcess = processHandle
             }
 
-withTerminalEnv :: Maybe [(String, String)] -> IO [(String, String)]
+withTerminalEnv :: Maybe [(String, Maybe String)] -> IO [(String, String)]
 withTerminalEnv envOverrides = do
     existing <- getEnvironment
     let merged =
@@ -500,13 +512,39 @@ withTerminalEnv envOverrides = do
                 Nothing -> existing
                 Just overrides ->
                     foldl'
-                        (\acc (key, value) -> overrideEnv key value acc)
+                        (\acc (key, value) -> applyEnvOverride key value acc)
                         existing
                         overrides
-    pure (overrideEnv "TERM" "xterm-256color" merged)
+    pure (applyEnvOverride "TERM" (Just "xterm-256color") merged)
   where
-    overrideEnv key value pairs =
-        (key, value) : filter ((/= key) . fst) pairs
+    applyEnvOverride key maybeValue pairs =
+        case maybeValue of
+            Nothing ->
+                filter ((/= key) . fst) pairs
+            Just value ->
+                (key, value) : filter ((/= key) . fst) pairs
+
+wrapLaunchWithCwd :: App -> (FilePath, [String])
+wrapLaunchWithCwd appSpec =
+    case cwd appSpec of
+        Nothing -> (command appSpec, args appSpec)
+        Just cwdPath ->
+            ( "/bin/sh"
+            ,
+                [ "-lc"
+                , "cd "
+                    <> shellQuote cwdPath
+                    <> " && exec "
+                    <> unwords (map shellQuote (command appSpec : args appSpec))
+                ]
+            )
+
+shellQuote :: String -> String
+shellQuote value =
+    "'" <> concatMap escapeChar value <> "'"
+  where
+    escapeChar '\'' = "'\\''"
+    escapeChar c = [c]
 
 teardownTui :: Tui -> IO ()
 teardownTui tui =
@@ -1364,18 +1402,21 @@ selectorMatches selector viewport =
 
 assertNotAmbiguous :: Tui -> Selector -> Viewport -> IO ()
 assertNotAmbiguous tui selector viewport =
+    assertNotAmbiguousWithMode (tuiName tui) (ambiguityMode (tuiOptions tui)) selector viewport
+
+assertNotAmbiguousWithMode :: String -> AmbiguityMode -> Selector -> Viewport -> IO ()
+assertNotAmbiguousWithMode testName mode selector viewport =
     when shouldFail $
         throwIO $
             AssertionError
                 ( "Ambiguous selector for test '"
-                    <> tuiName tui
+                    <> testName
                     <> "'; matched "
                     <> show totalMatches
                     <> " elements."
                 )
   where
     totalMatches = matchCount selector viewport
-    mode = ambiguityMode (tuiOptions tui)
     shouldFail =
         mode == FailOnAmbiguous
             && totalMatches > 1

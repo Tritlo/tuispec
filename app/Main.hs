@@ -1,16 +1,19 @@
 module Main where
 
 import Data.List (isSuffixOf)
+import Data.Text.IO qualified as TIO
 import Options.Applicative
 import Text.Read (readMaybe)
 import TuiSpec.Render (renderAnsiSnapshotFileWithFont, renderAnsiSnapshotTextFile)
+import TuiSpec.Replay (ReplaySpeed (ReplayAsFastAsPossible, ReplayRealTime), readRecordingEvents, replayRecordedRequests)
 import TuiSpec.Server qualified as Server
-import TuiSpec.Types (AmbiguityMode (FailOnAmbiguous, FirstVisibleMatch))
+import TuiSpec.Types (AmbiguityMode (FailOnAmbiguous, FirstVisibleMatch, LastVisibleMatch))
 
 data Command
     = Render RenderOptions
     | RenderText RenderTextOptions
     | Server ServerOptions
+    | Replay ReplayOptions
 
 data RenderOptions = RenderOptions
     { inputPath :: FilePath
@@ -34,6 +37,11 @@ data ServerOptions = ServerOptions
     , serverRows :: Int
     , timeoutSeconds :: Int
     , ambiguity :: AmbiguityMode
+    }
+
+data ReplayOptions = ReplayOptions
+    { replayInputPath :: FilePath
+    , replaySpeed :: ReplaySpeed
     }
 
 main :: IO ()
@@ -61,6 +69,10 @@ runCommand parsedCommand =
                     , Server.serverTimeoutSeconds = timeoutSeconds options
                     , Server.serverAmbiguityMode = ambiguity options
                     }
+        Replay options -> do
+            events <- readRecordingEvents (replayInputPath options)
+            replayed <- replayRecordedRequests (replaySpeed options) events TIO.putStrLn
+            putStrLn ("Replayed " <> show replayed <> " request messages")
 
 commandParserInfo :: ParserInfo Command
 commandParserInfo =
@@ -91,6 +103,12 @@ parseCommand =
                 ( info
                     (Server <$> parseServerOptions)
                     (progDesc "Run JSON-RPC server on stdin/stdout for interactive TUI orchestration")
+                )
+            <> command
+                "replay"
+                ( info
+                    (Replay <$> parseReplayOptions)
+                    (progDesc "Replay request lines from a tuispec JSONL recording")
                 )
         )
 
@@ -208,9 +226,26 @@ parseServerOptions =
             ambiguityModeReader
             ( long "ambiguity-mode"
                 <> metavar "MODE"
-                <> help "Default ambiguity mode: fail|first-visible"
+                <> help "Default ambiguity mode: fail|first-visible|last-visible"
                 <> value FailOnAmbiguous
                 <> showDefaultWith renderAmbiguityMode
+            )
+
+parseReplayOptions :: Parser ReplayOptions
+parseReplayOptions =
+    ReplayOptions
+        <$> argument
+            str
+            ( metavar "RECORDING_JSONL"
+                <> help "Path to a recording JSONL file"
+            )
+        <*> option
+            replaySpeedReader
+            ( long "speed"
+                <> metavar "MODE"
+                <> help "Replay speed: as-fast-as-possible|real-time"
+                <> value ReplayAsFastAsPossible
+                <> showDefaultWith renderReplaySpeed
             )
 
 positiveIntReader :: ReadM Int
@@ -227,13 +262,30 @@ ambiguityModeReader =
             "fail" -> Right FailOnAmbiguous
             "first-visible" -> Right FirstVisibleMatch
             "first" -> Right FirstVisibleMatch
-            _ -> Left "Expected ambiguity mode: fail|first-visible"
+            "last-visible" -> Right LastVisibleMatch
+            "last" -> Right LastVisibleMatch
+            _ -> Left "Expected ambiguity mode: fail|first-visible|last-visible"
 
 renderAmbiguityMode :: AmbiguityMode -> String
 renderAmbiguityMode mode =
     case mode of
         FailOnAmbiguous -> "fail"
         FirstVisibleMatch -> "first-visible"
+        LastVisibleMatch -> "last-visible"
+
+replaySpeedReader :: ReadM ReplaySpeed
+replaySpeedReader =
+    eitherReader $ \raw ->
+        case raw of
+            "as-fast-as-possible" -> Right ReplayAsFastAsPossible
+            "real-time" -> Right ReplayRealTime
+            _ -> Left "Expected replay speed: as-fast-as-possible|real-time"
+
+renderReplaySpeed :: ReplaySpeed -> String
+renderReplaySpeed speed =
+    case speed of
+        ReplayAsFastAsPossible -> "as-fast-as-possible"
+        ReplayRealTime -> "real-time"
 
 defaultOutputPath :: FilePath -> FilePath
 defaultOutputPath input =

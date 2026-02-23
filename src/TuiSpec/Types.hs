@@ -41,27 +41,43 @@ data Spec = Spec
     , specBody :: Tui -> IO ()
     }
 
--- | The command to launch inside the PTY.
+{- | The command to launch inside the PTY.
+
+`env` overrides inherit from the parent process. Use:
+
+- `Just "value"` to set or override an environment variable
+- `Nothing` to unset an inherited variable
+
+`cwd` sets the working directory for the launch command when present.
+-}
 data App = App
     { command :: FilePath
     , args :: [String]
-    , env :: Maybe [(String, String)]
+    , env :: Maybe [(String, Maybe String)]
+    , cwd :: Maybe FilePath
     }
     deriving (Eq, Show)
 
--- | Construct an app launch request using inherited environment variables.
+{- | Construct an app launch request using inherited environment variables and
+the current working directory.
+-}
 app :: FilePath -> [String] -> App
 app commandValue argsValue =
     App
         { command = commandValue
         , args = argsValue
         , env = Nothing
+        , cwd = Nothing
         }
 
 -- | How selector ambiguity is handled for assertion helpers.
 data AmbiguityMode
-    = FailOnAmbiguous
-    | FirstVisibleMatch
+    = -- | Fail when a non-explicit selector matches more than one target.
+      FailOnAmbiguous
+    | -- | Accept ambiguous matches and use first-match behavior.
+      FirstVisibleMatch
+    | -- | Accept ambiguous matches and use last-match behavior.
+      LastVisibleMatch
     deriving (Eq, Show, Read)
 
 -- | Runtime options for a @tuiTest@ execution.
