@@ -44,7 +44,7 @@ import System.IO.Error (isEOFError, tryIOError)
 import System.Posix.Process (exitImmediately)
 import System.Posix.Signals (Handler (Catch), installHandler, sigHUP)
 import TuiSpec.Render (renderAnsiSnapshotFileWithFont)
-import TuiSpec.Replay (RecordingDirection (DirectionFrame, DirectionNotification, DirectionRequest, DirectionResponse), RecordingHandle, ReplaySpeed (ReplayAsFastAsPossible, ReplayRealTime), appendRecordingEvent, closeRecording, openRecording, streamReplayRequests)
+import TuiSpec.Replay (RecordingDirection (DirectionFrame, DirectionFrameDelta, DirectionNotification, DirectionRequest, DirectionResponse), RecordingHandle, ReplaySpeed (ReplayAsFastAsPossible, ReplayRealTime), appendRecordingEvent, closeRecording, computeFrameDelta, openRecording, streamReplayRequests)
 import TuiSpec.Runner (currentView, defaultWaitOptionsFor, dumpView, expectNotVisible, expectSnapshot, expectVisible, killSessionChildrenNow, launch, openSession, press, pressCombo, renderAnsiViewportText, sendLine, serializeAnsiSnapshot, typeText, waitForSelectorWithAmbiguity)
 import TuiSpec.Types (AmbiguityMode (FailOnAmbiguous, FirstVisibleMatch, LastVisibleMatch), App (..), Key (..), Modifier (Alt, Control, Shift), Rect (Rect), RunOptions (..), Selector (..), SnapshotName (SnapshotName), Tui (..), WaitOptions (..), defaultRunOptions, tuispecVersion)
 
@@ -556,12 +556,14 @@ dispatchRecordingStart state paramsValue =
                 handle <- openRecording (recordingStartPath params)
                 canonicalPath <- canonicalizePath (recordingStartPath params)
                 let intervalMs = recordingFrameIntervalMs params
+                let keyframeEvery = max 1 (1000 `div` max 1 intervalMs)
                 samplerStop <-
                     if intervalMs > 0
                         then do
                             stopRef <- newIORef False
                             lastFrameRef <- newIORef ("" :: Text)
-                            _ <- forkIO (frameSamplerLoop state handle lastFrameRef stopRef intervalMs)
+                            tickRef <- newIORef (0 :: Int)
+                            _ <- forkIO (frameSamplerLoop state handle lastFrameRef tickRef keyframeEvery stopRef intervalMs)
                             pure (Just stopRef)
                         else pure Nothing
                 writeIORef
@@ -759,11 +761,13 @@ withActiveRecording state action = do
         Just recording -> action recording
 
 {- | Background thread that samples the viewport at a fixed interval and
-writes frame events to the recording JSONL. Deduplicates consecutive
-identical frames. Exits when the stop flag is set to @True@.
+writes frame events to the recording JSONL. Emits full keyframes
+periodically (roughly every second) and compact line-level deltas in
+between. Deduplicates consecutive identical frames. Exits when the stop
+flag is set to @True@.
 -}
-frameSamplerLoop :: ServerState -> RecordingHandle -> IORef Text -> IORef Bool -> Int -> IO ()
-frameSamplerLoop state handle lastFrameRef stopRef intervalMs = loop
+frameSamplerLoop :: ServerState -> RecordingHandle -> IORef Text -> IORef Int -> Int -> IORef Bool -> Int -> IO ()
+frameSamplerLoop state handle lastFrameRef tickRef keyframeEvery stopRef intervalMs = loop
   where
     loop = do
         threadDelay (intervalMs * 1000)
@@ -781,8 +785,14 @@ frameSamplerLoop state handle lastFrameRef stopRef intervalMs = loop
                             Right frameText -> do
                                 lastFrame <- readIORef lastFrameRef
                                 when (frameText /= lastFrame) $ do
+                                    tick <- readIORef tickRef
+                                    if tick == 0 || T.null lastFrame
+                                        then appendRecordingEvent handle DirectionFrame frameText
+                                        else case computeFrameDelta lastFrame frameText of
+                                            Nothing -> pure ()
+                                            Just deltaText -> appendRecordingEvent handle DirectionFrameDelta deltaText
                                     writeIORef lastFrameRef frameText
-                                    appendRecordingEvent handle DirectionFrame frameText
+                                    writeIORef tickRef ((tick + 1) `mod` keyframeEvery)
                                 loop
 
 decodeParamsValue :: (FromJSON a) => Value -> Either RpcFailure a

@@ -256,12 +256,15 @@ CLI command: `tuispec replay`
 
 Recording JSONL files contain one event per line:
 - `timestampMicros`: microseconds since POSIX epoch
-- `direction`: `request|response|notification|frame`
-- `line`: raw JSON-RPC line, or viewport text for `frame` events
+- `direction`: `request|response|notification|frame|frame-delta`
+- `line`: raw JSON-RPC line, viewport text, or delta payload
 
 Frame events are captured by a background sampling thread during
 `recording.start` at a configurable rate (default 200ms = 5 Hz).
-Consecutive identical frames are deduplicated.
+Consecutive identical frames are deduplicated. Full keyframes (`frame`)
+are emitted roughly every second; compact line-level deltas
+(`frame-delta`) are emitted in between. Delta payloads are JSON arrays
+of `[lineIndex, "text"]` pairs.
 
 ## 9. JSON-RPC Server
 

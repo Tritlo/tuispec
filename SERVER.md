@@ -241,13 +241,20 @@ If `includeText=true`, notification params also include `text`.
 Recording files are JSONL with one event per line and include:
 
 - `timestampMicros`
-- `direction` (`request|response|notification|frame`)
-- `line` (raw JSON-RPC line, or viewport text for `frame` events)
+- `direction` (`request|response|notification|frame|frame-delta`)
+- `line` (raw JSON-RPC line, viewport text, or delta payload)
 
 When `frameIntervalMs > 0` (the default), the server spawns a background thread
 that samples the viewport at the configured rate. Only frames that differ from
-the previous sample are written. Frame events have `direction: "frame"` and
-their `line` field contains the rendered visible viewport text.
+the previous sample are written. Two frame event types are used:
+
+- `frame` — full keyframe, emitted roughly every second. `line` contains the
+  complete rendered viewport text.
+- `frame-delta` — compact delta, emitted between keyframes. `line` contains a
+  JSON array of `[lineIndex, "new line text"]` pairs for each changed line.
+
+The replay CLI reconstructs full frames by applying deltas to the most recent
+keyframe.
 
 ### Server Utility
 

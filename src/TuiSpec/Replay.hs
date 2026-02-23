@@ -14,6 +14,7 @@ module TuiSpec.Replay (
     ReplaySpeed (..),
     appendRecordingEvent,
     closeRecording,
+    computeFrameDelta,
     openRecording,
     streamReplayFrames,
     streamReplayRequests,
@@ -22,10 +23,14 @@ module TuiSpec.Replay (
 import Control.Concurrent (threadDelay)
 import Control.Exception (Exception, bracket, throwIO)
 import Control.Monad (when)
-import Data.Aeson (FromJSON (parseJSON), ToJSON (toJSON), eitherDecodeStrict', encode, object, withObject, (.:), (.=))
+import Data.Aeson (FromJSON (parseJSON), ToJSON (toJSON), Value (Array, Number, String), eitherDecodeStrict', encode, object, withObject, (.:), (.=))
+import Data.Aeson qualified as Aeson
 import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy qualified as BL
+import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Int (Int64)
+import Data.IntMap.Strict (IntMap)
+import Data.IntMap.Strict qualified as IM
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
@@ -39,7 +44,10 @@ data RecordingDirection
     = DirectionRequest
     | DirectionResponse
     | DirectionNotification
-    | DirectionFrame
+    | -- | Full viewport keyframe (line contains the complete visible text).
+      DirectionFrame
+    | -- | Delta frame (line contains JSON-encoded changed lines since last keyframe).
+      DirectionFrameDelta
     deriving (Eq, Show)
 
 instance ToJSON RecordingDirection where
@@ -49,6 +57,7 @@ instance ToJSON RecordingDirection where
             DirectionResponse -> toJSON ("response" :: Text)
             DirectionNotification -> toJSON ("notification" :: Text)
             DirectionFrame -> toJSON ("frame" :: Text)
+            DirectionFrameDelta -> toJSON ("frame-delta" :: Text)
 
 instance FromJSON RecordingDirection where
     parseJSON value = do
@@ -58,7 +67,8 @@ instance FromJSON RecordingDirection where
             "response" -> pure DirectionResponse
             "notification" -> pure DirectionNotification
             "frame" -> pure DirectionFrame
-            _ -> fail "direction must be one of: request, response, notification, frame"
+            "frame-delta" -> pure DirectionFrameDelta
+            _ -> fail "direction must be one of: request, response, notification, frame, frame-delta"
 
 -- | Single JSONL event written to disk.
 data RecordingEvent = RecordingEvent
@@ -138,48 +148,153 @@ streamReplayRequests :: ReplaySpeed -> FilePath -> (Text -> IO ()) -> IO Int
 streamReplayRequests speed path runRequest =
     streamFilteredEvents speed path DirectionRequest runRequest
 
-{- | Stream replay of frame events from a JSONL recording file. Each
-captured viewport frame is dispatched to the callback with inter-frame
-timing preserved in real-time mode. Returns the total number of frames
-replayed.
+{- | Stream replay of frame events from a JSONL recording file. Handles
+both full keyframes (@frame@) and delta frames (@frame-delta@),
+reconstructing full viewport text before dispatching to the callback.
+Returns the total number of frames replayed.
 -}
 streamReplayFrames :: ReplaySpeed -> FilePath -> (Text -> IO ()) -> IO Int
 streamReplayFrames speed path showFrame =
-    streamFilteredEvents speed path DirectionFrame showFrame
+    bracket (openFile path ReadMode) hClose $ \fileHandle -> do
+        currentLinesRef <- newIORef ([] :: [Text])
+        go fileHandle currentLinesRef (1 :: Int) Nothing 0
+  where
+    go fileHandle currentLinesRef lineNumber maybePrev !count = do
+        eof <- hIsEOF fileHandle
+        if eof
+            then pure count
+            else do
+                lineValue <- BS8.hGetLine fileHandle
+                let trimmed = TE.decodeUtf8 lineValue
+                if T.null (T.strip trimmed)
+                    then go fileHandle currentLinesRef (lineNumber + 1) maybePrev count
+                    else case eitherDecodeStrict' lineValue of
+                        Left err ->
+                            throwIO
+                                (RecordingParseError path ("line " <> show lineNumber <> ": " <> err))
+                        Right event
+                            | recordingDirection event == DirectionFrame -> do
+                                applyReplayDelay speed maybePrev event
+                                let frameLines = T.splitOn "\n" (recordingLine event)
+                                writeIORef currentLinesRef frameLines
+                                showFrame (recordingLine event)
+                                go fileHandle currentLinesRef (lineNumber + 1) (Just event) (count + 1)
+                            | recordingDirection event == DirectionFrameDelta -> do
+                                applyReplayDelay speed maybePrev event
+                                baseLines <- readIORef currentLinesRef
+                                let updatedLines = applyDelta baseLines (recordingLine event)
+                                writeIORef currentLinesRef updatedLines
+                                showFrame (T.intercalate "\n" updatedLines)
+                                go fileHandle currentLinesRef (lineNumber + 1) (Just event) (count + 1)
+                            | otherwise ->
+                                go fileHandle currentLinesRef (lineNumber + 1) maybePrev count
 
 -- | Internal: stream events matching a given direction from a JSONL file.
 streamFilteredEvents :: ReplaySpeed -> FilePath -> RecordingDirection -> (Text -> IO ()) -> IO Int
 streamFilteredEvents speed path direction callback =
-    bracket (openFile path ReadMode) hClose $ \handle ->
-        go handle (1 :: Int) Nothing 0
+    bracket (openFile path ReadMode) hClose $ \fileHandle ->
+        go fileHandle (1 :: Int) Nothing 0
   where
-    go handle lineNumber maybePrev !count = do
-        eof <- hIsEOF handle
+    go fileHandle lineNumber maybePrev !count = do
+        eof <- hIsEOF fileHandle
         if eof
             then pure count
             else do
-                lineValue <- BS8.hGetLine handle
+                lineValue <- BS8.hGetLine fileHandle
                 let trimmed = TE.decodeUtf8 lineValue
                 if T.null (T.strip trimmed)
-                    then go handle (lineNumber + 1) maybePrev count
+                    then go fileHandle (lineNumber + 1) maybePrev count
                     else case eitherDecodeStrict' lineValue of
                         Left err ->
                             throwIO
                                 (RecordingParseError path ("line " <> show lineNumber <> ": " <> err))
                         Right event
                             | recordingDirection event == direction -> do
-                                case speed of
-                                    ReplayAsFastAsPossible -> pure ()
-                                    ReplayRealTime ->
-                                        case maybePrev of
-                                            Nothing -> pure ()
-                                            Just prev -> do
-                                                let delta = recordingTimestampMicros event - recordingTimestampMicros prev
-                                                when (delta > 0) $ threadDelay (fromIntegral delta)
+                                applyReplayDelay speed maybePrev event
                                 callback (recordingLine event)
-                                go handle (lineNumber + 1) (Just event) (count + 1)
+                                go fileHandle (lineNumber + 1) (Just event) (count + 1)
                             | otherwise ->
-                                go handle (lineNumber + 1) maybePrev count
+                                go fileHandle (lineNumber + 1) maybePrev count
+
+-- | Apply inter-event timing delay when in real-time replay mode.
+applyReplayDelay :: ReplaySpeed -> Maybe RecordingEvent -> RecordingEvent -> IO ()
+applyReplayDelay speed maybePrev event =
+    case speed of
+        ReplayAsFastAsPossible -> pure ()
+        ReplayRealTime ->
+            case maybePrev of
+                Nothing -> pure ()
+                Just prev -> do
+                    let delta = recordingTimestampMicros event - recordingTimestampMicros prev
+                    when (delta > 0) $ threadDelay (fromIntegral delta)
+
+{- | Compute a line-level delta between two viewport texts. Returns
+@Nothing@ when the frames are identical, or @Just encodedDelta@ with a
+JSON-encoded array of @[lineIndex, \"new line text\"]@ pairs for each
+changed line.
+-}
+computeFrameDelta :: Text -> Text -> Maybe Text
+computeFrameDelta oldFrame newFrame
+    | oldFrame == newFrame = Nothing
+    | otherwise =
+        let oldLines = T.splitOn "\n" oldFrame
+            newLines = T.splitOn "\n" newFrame
+            changes = collectChanges 0 oldLines newLines
+         in if null changes
+                then Nothing
+                else Just (encodeDelta changes)
+
+-- | Collect (index, newLine) pairs for lines that differ.
+collectChanges :: Int -> [Text] -> [Text] -> [(Int, Text)]
+collectChanges !idx olds news =
+    case (olds, news) of
+        ([], []) -> []
+        ([], n : ns) -> (idx, n) : collectChanges (idx + 1) [] ns
+        (_ : os, []) -> (idx, "") : collectChanges (idx + 1) os []
+        (o : os, n : ns)
+            | o == n -> collectChanges (idx + 1) os ns
+            | otherwise -> (idx, n) : collectChanges (idx + 1) os ns
+
+-- | Encode a list of (lineIndex, text) changes as a JSON array of pairs.
+encodeDelta :: [(Int, Text)] -> Text
+encodeDelta changes =
+    TE.decodeUtf8 . BL.toStrict . Aeson.encode $
+        Array (listToAesonArray (map encodePair changes))
+  where
+    encodePair (idx, txt) =
+        Array (listToAesonArray [Number (fromIntegral idx), String txt])
+
+-- | Apply a JSON-encoded delta to a list of lines.
+applyDelta :: [Text] -> Text -> [Text]
+applyDelta baseLines deltaText =
+    case Aeson.eitherDecodeStrict' (TE.encodeUtf8 deltaText) of
+        Left _ -> baseLines
+        Right (Array arr) ->
+            let patches = foldr parsePatch IM.empty (aesonArrayToList arr)
+                baseMap = IM.fromList (zip [0 ..] baseLines)
+                maxIdx = if IM.null patches then 0 else fst (IM.findMax patches)
+                paddedMap =
+                    if maxIdx >= length baseLines
+                        then IM.union baseMap (IM.fromList [(i, "") | i <- [length baseLines .. maxIdx]])
+                        else baseMap
+                merged = IM.union patches paddedMap
+             in map snd (IM.toAscList merged)
+        Right _ -> baseLines
+  where
+    parsePatch :: Value -> IntMap Text -> IntMap Text
+    parsePatch (Array pair) acc =
+        case aesonArrayToList pair of
+            [Number n, String txt] -> IM.insert (floor n) txt acc
+            _ -> acc
+    parsePatch _ acc = acc
+
+-- | Convert a Haskell list to an Aeson Array value.
+listToAesonArray :: [Value] -> Aeson.Array
+listToAesonArray = foldMap (\v -> pure v)
+
+-- | Convert an Aeson Array to a Haskell list.
+aesonArrayToList :: Aeson.Array -> [Value]
+aesonArrayToList = foldr (:) []
 
 toJsonLine :: RecordingEvent -> String
 toJsonLine = T.unpack . TE.decodeUtf8 . BL.toStrict . encode
