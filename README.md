@@ -8,6 +8,7 @@ Current design:
 - per-test isolation (fresh PTY process per test)
 - text selectors + keypress/input actions
 - snapshot assertions with text + PNG artifacts
+- optional REPL-like session mode for ad-hoc exploration
 
 ## Quick start
 
@@ -56,6 +57,32 @@ cabal run tuispec -- render-text artifacts/tests/my-test/snapshots/<snapshot>.an
 ```
 
 `render-text` reads rows/cols from `<snapshot>.meta.json` automatically, with optional `--rows` and `--cols` overrides.
+
+## REPL-style usage
+
+For ad-hoc sessions (outside `tasty`), use `withTuiSession` and `dumpView`:
+
+```haskell
+{-# LANGUAGE OverloadedStrings #-}
+
+import TuiSpec
+
+main :: IO ()
+main =
+  withTuiSession
+    defaultRunOptions { artifactsDir = "artifacts/repl" }
+    "demo-repl"
+    $ \tui -> do
+        launch tui (App "my-tui" [])
+        sendLine tui "/help"
+        _ <- dumpView tui "step-1"
+        sendLine tui "q"
+```
+
+Artifacts land under:
+
+- `artifacts/repl/sessions/demo-repl/snapshots/<name>.ansi.txt`
+- `artifacts/repl/sessions/demo-repl/snapshots/<name>.meta.json`
 
 ## Minimal example
 

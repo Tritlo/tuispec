@@ -9,6 +9,8 @@ Most users interact with this module through 'tuiTest' and the action/assertion
 functions ('launch', 'press', 'waitForText', 'expectSnapshot', ...).
 -}
 module TuiSpec.Runner (
+    currentView,
+    dumpView,
     expectNotVisible,
     expectSnapshot,
     expectVisible,
@@ -16,10 +18,12 @@ module TuiSpec.Runner (
     press,
     pressCombo,
     renderAnsiViewportText,
+    sendLine,
     serializeAnsiSnapshot,
     step,
     tuiTest,
     typeText,
+    withTuiSession,
     waitFor,
     waitForText,
 ) where
@@ -73,6 +77,26 @@ instance Exception StepFailure
 
 settleDelayMicros :: Int
 settleDelayMicros = 80 * 1000
+
+{- | Run an ad-hoc PTY session outside @tasty@.
+
+This is useful for REPL-like exploration workflows where you want to:
+
+- launch a TUI once
+- drive it with input primitives
+- dump intermediate views without snapshot assertions
+-}
+withTuiSession :: RunOptions -> String -> (Tui -> IO a) -> IO a
+withTuiSession options name body = do
+    envOptions <- applyEnvOverrides options
+    projectRoot <- resolveProjectRoot
+    artifactBase <- resolveArtifactsBaseDir projectRoot (artifactsDir envOptions)
+    let effectiveOptions = envOptions{artifactsDir = artifactBase}
+    let sessionRoot = artifactBase </> "sessions" </> slugify name
+    resetDirectory sessionRoot
+    createDirectoryIfMissing True sessionRoot
+    tui <- mkTui projectRoot effectiveOptions name sessionRoot sessionRoot 1
+    body tui `finally` teardownTui tui
 
 {- | Build a @tasty@ 'TestTree' from a TUI spec body.
 
@@ -183,6 +207,16 @@ typeText tui textValue = do
         Nothing ->
             throwIO (AssertionError "PTY backend unavailable during typeText")
 
+-- | Send a line of text followed by @Enter@.
+sendLine :: Tui -> Text -> IO ()
+sendLine tui line = do
+    typeText tui line
+    press tui Enter
+
+-- | Return the current visible viewport text.
+currentView :: Tui -> IO Text
+currentView = syncVisibleBuffer
+
 -- | Assert that a selector eventually becomes visible.
 expectVisible :: Tui -> Selector -> IO ()
 expectVisible tui selector = do
@@ -239,10 +273,6 @@ Writes:
 -}
 expectSnapshot :: Tui -> SnapshotName -> IO ()
 expectSnapshot tui snapshotName = do
-    when (T.null (unSnapshotName snapshotName)) $
-        throwIO (AssertionError "snapshot name cannot be empty")
-    _ <- syncVisibleBuffer tui
-    state <- readIORef (tuiStateRef tui)
     let requestedTheme = snapshotTheme (tuiOptions tui)
     when (not (isKnownSnapshotTheme requestedTheme)) $
         appendWarning
@@ -253,23 +283,14 @@ expectSnapshot tui snapshotName = do
                 <> T.pack (snapshotThemeName defaultSnapshotTheme)
                 <> "."
             )
-    let actualAnsi = rawBuffer state
+    (snapshotStem, actualAnsi, actualAnsiPath) <- captureSnapshotToDir tui (tuiTestRoot tui </> "snapshots") snapshotName
     let rows = terminalRows (tuiOptions tui)
     let cols = terminalCols (tuiOptions tui)
-    let snapshotStem = safeFileStem (T.unpack (unSnapshotName snapshotName))
-    let actualDir = tuiTestRoot tui </> "snapshots"
     let baselineDir = tuiSnapshotRoot tui
-    createDirectoryIfMissing True actualDir
     createDirectoryIfMissing True baselineDir
 
-    let actualAnsiPath = actualDir </> (snapshotStem <> ".ansi.txt")
     let baselineAnsiPath = baselineDir </> (snapshotStem <> ".ansi.txt")
-    let actualMetaPath = snapshotMetadataPath actualAnsiPath
     let baselineMetaPath = snapshotMetadataPath baselineAnsiPath
-
-    TIO.writeFile actualAnsiPath actualAnsi
-    writeSnapshotMetadata actualMetaPath rows cols
-    appendSnapshotArtifact tui actualAnsiPath
 
     baselineExists <- doesFileExist baselineAnsiPath
     if updateSnapshots (tuiOptions tui) || not baselineExists
@@ -296,6 +317,16 @@ expectSnapshot tui snapshotName = do
                                 <> ". Render with: tuispec render "
                                 <> actualAnsiPath
                             )
+
+{- | Persist the current PTY view as an ANSI snapshot artifact.
+
+This writes only to the active run directory and does not compare against a
+baseline, making it suitable for iterative REPL-style exploration.
+-}
+dumpView :: Tui -> SnapshotName -> IO FilePath
+dumpView tui snapshotName = do
+    (_stem, _ansi, ansiPath) <- captureSnapshotToDir tui (tuiTestRoot tui </> "snapshots") snapshotName
+    pure ansiPath
 
 {- | Canonicalize ANSI text into a theme-aware JSON framebuffer.
 
@@ -449,7 +480,8 @@ terminatePtyHandle :: PtyHandle -> IO ()
 terminatePtyHandle ptyHandle = do
     ignoreIOError (terminateProcess (ptyProcess ptyHandle))
     _ <- timeout (500 * 1000) (ignoreIOError (void (waitForProcess (ptyProcess ptyHandle))))
-    ignoreIOError (Pty.closePty (ptyMaster ptyHandle))
+    _ <- timeout (500 * 1000) (ignoreIOError (Pty.closePty (ptyMaster ptyHandle)))
+    pure ()
 
 readPty :: Tui -> IO (Maybe PtyHandle)
 readPty tui = readIORef (tuiPty tui)
@@ -1458,6 +1490,24 @@ writeSnapshotMetadata metaPath rows cols =
                 ]
             )
         )
+
+captureSnapshotToDir :: Tui -> FilePath -> SnapshotName -> IO (String, Text, FilePath)
+captureSnapshotToDir tui targetDir snapshotName = do
+    when (T.null (unSnapshotName snapshotName)) $
+        throwIO (AssertionError "snapshot name cannot be empty")
+    _ <- syncVisibleBuffer tui
+    state <- readIORef (tuiStateRef tui)
+    let actualAnsi = rawBuffer state
+    let rows = terminalRows (tuiOptions tui)
+    let cols = terminalCols (tuiOptions tui)
+    let snapshotStem = safeFileStem (T.unpack (unSnapshotName snapshotName))
+    createDirectoryIfMissing True targetDir
+    let ansiPath = targetDir </> (snapshotStem <> ".ansi.txt")
+    let metaPath = snapshotMetadataPath ansiPath
+    TIO.writeFile ansiPath actualAnsi
+    writeSnapshotMetadata metaPath rows cols
+    appendSnapshotArtifact tui ansiPath
+    pure (snapshotStem, actualAnsi, ansiPath)
 
 applyEnvOverrides :: RunOptions -> IO RunOptions
 applyEnvOverrides options = do

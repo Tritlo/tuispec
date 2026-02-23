@@ -2,7 +2,9 @@
 
 module Main where
 
+import System.Directory (doesFileExist)
 import Test.Tasty (defaultMain, testGroup)
+import Test.Tasty.HUnit (assertBool, testCase)
 import TuiSpec
 
 main :: IO ()
@@ -19,11 +21,25 @@ main =
                 "smoke: text appears in viewport"
                 $ \tui -> do
                     launch tui (App "sh" [])
-                    typeText tui "printf 'hello from tuispec\\n'"
-                    press tui Enter
+                    sendLine tui "printf 'hello from tuispec\\n'"
                     waitForText tui (Exact "hello from tuispec")
                     expectNotVisible tui (Exact "this text should not exist")
                     expectSnapshot tui "smoke-viewport"
-                    typeText tui "exit"
-                    press tui Enter
+                    sendLine tui "exit"
+            , testCase "smoke: repl session can dump view" $ do
+                snapshotPath <-
+                    withTuiSession
+                        defaultRunOptions
+                            { timeoutSeconds = 8
+                            , artifactsDir = "artifacts/repl-smoke"
+                            }
+                        "session"
+                        $ \tui -> do
+                            launch tui (App "sh" [])
+                            sendLine tui "printf 'hello from repl session\\n'"
+                            snapshotPath <- dumpView tui "repl-view"
+                            sendLine tui "exit"
+                            pure snapshotPath
+                exists <- doesFileExist snapshotPath
+                assertBool "dumpView should write an ansi snapshot file" exists
             ]
