@@ -9,6 +9,7 @@
 * Include tuispec version in `initialize` response and snapshot `meta.json`.
 * Fix theme-aware color rendering for light/dark PNG snapshots.
 * Use alternate screen buffer for replay to avoid polluting terminal scrollback.
+* Fix test flakiness caused by orphaned PTY child processes between server tests.
 
 ## 0.2.0.0 — 2026-02-23
 
