@@ -19,6 +19,7 @@ Use these APIs from `TuiSpec`:
   returns current visible viewport text
 - `dumpView`:
   writes the current screen to `<name>.ansi.txt` + `<name>.meta.json`
+  and can render PNG in one call via server (`format: "png"|"both"`)
 
 Relevant implementation:
 
@@ -141,12 +142,14 @@ Then send requests like:
 
 ```json
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"name":"demo"}}
-{"jsonrpc":"2.0","id":2,"method":"launch","params":{"command":"sh","args":["-lc","tui-demo"],"env":{"DEMO_MODE":"1"}}}
+{"jsonrpc":"2.0","id":2,"method":"launch","params":{"command":"sh","args":["-lc","printf 'READY\\n'; exec sh"],"env":{"DEMO_MODE":"1","CLAUDECODE":null},"cwd":".","readySelector":{"type":"exact","text":"READY"}}}
 {"jsonrpc":"2.0","id":3,"method":"sendKey","params":{"key":"ArrowDown"}}
 {"jsonrpc":"2.0","id":4,"method":"sendKey","params":{"key":"Enter"}}
-{"jsonrpc":"2.0","id":5,"method":"dumpView","params":{"name":"after-enter"}}
-{"jsonrpc":"2.0","id":6,"method":"currentView","params":null}
-{"jsonrpc":"2.0","id":7,"method":"server.shutdown","params":null}
+{"jsonrpc":"2.0","id":5,"method":"dumpView","params":{"name":"after-enter","format":"both"}}
+{"jsonrpc":"2.0","id":6,"method":"currentView","params":{"entireRow":1}}
+{"jsonrpc":"2.0","id":7,"method":"recording.start","params":{"path":"artifacts/server/demo.jsonl"}}
+{"jsonrpc":"2.0","id":8,"method":"recording.stop","params":{}}
+{"jsonrpc":"2.0","id":9,"method":"server.shutdown","params":null}
 ```
 
 ### Supported key strings for `sendKey`
@@ -169,4 +172,18 @@ For `initialize` name `demo`:
 ```bash
 cabal run tuispec -- render artifacts/server/sessions/demo/snapshots/after-enter.ansi.txt
 cabal run tuispec -- render-text artifacts/server/sessions/demo/snapshots/after-enter.ansi.txt
+```
+
+### JSONL replay
+
+Replay recorded request lines from a JSONL file:
+
+```bash
+cabal run tuispec -- replay artifacts/server/demo.jsonl --speed as-fast-as-possible
+```
+
+For push-based polling alternatives, subscribe to view changes:
+
+```json
+{"jsonrpc":"2.0","id":10,"method":"viewSubscribe","params":{"debounceMs":100,"includeText":false}}
 ```

@@ -102,8 +102,11 @@ withTuiSession defaultRunOptions "demo" $ \tui -> do
 - `sendLine :: Tui -> Text -> IO ()`
 
 `launch` replaces any currently running app for that `Tui` handle.
-When `App.env` is provided, launch inherits parent environment variables and
-overrides matching keys with provided values.
+When `App.env` is provided, launch inherits parent environment variables and:
+- `Just "value"` sets/overrides a variable
+- `Nothing` unsets an inherited variable
+
+When `App.cwd` is provided, launch runs in that working directory.
 
 ### 4.4 Waits and assertions
 
@@ -137,6 +140,7 @@ Behavior:
 Ambiguity mode:
 - `FailOnAmbiguous`: fail if selector has multiple matches (except explicit `At`/`Nth`)
 - `FirstVisibleMatch`: tolerate multiple matches
+- `LastVisibleMatch`: tolerate multiple matches
 
 ### 4.6 Input key model
 
@@ -193,6 +197,7 @@ Hard test timeout:
 - `TUISPEC_ARTIFACTS_DIR`
 - `TUISPEC_UPDATE_SNAPSHOTS`
 - `TUISPEC_AMBIGUITY_MODE` (`fail|first|first-visible`)
+- `TUISPEC_AMBIGUITY_MODE` (`fail|first|first-visible|last|last-visible`)
 - `TUISPEC_SNAPSHOT_THEME`
 
 Root/path helpers:
@@ -245,7 +250,7 @@ PNG renderer implementation details:
 CLI command:
 
 ```bash
-tuispec server --artifact-dir PATH [--cols N] [--rows N] [--timeout-seconds N] [--ambiguity-mode fail|first-visible]
+tuispec server --artifact-dir PATH [--cols N] [--rows N] [--timeout-seconds N] [--ambiguity-mode fail|first-visible|last-visible]
 ```
 
 Transport:
@@ -264,10 +269,20 @@ Methods:
 - `sendLine`
 - `currentView`
 - `dumpView`
+- `renderView`
+- `waitUntil`
+- `diffView`
 - `expectSnapshot`
 - `waitForText`
 - `expectVisible`
 - `expectNotVisible`
+- `viewSubscribe`
+- `viewUnsubscribe`
+- `batch`
+- `recording.start`
+- `recording.stop`
+- `recording.status`
+- `replay`
 - `server.ping`
 - `server.shutdown`
 
@@ -283,15 +298,20 @@ Server error codes:
 `launch` accepts:
 - `command` (string)
 - `args` (array of strings, optional)
-- `env` (object of string-to-string pairs, optional)
+- `env` (object of string-to-(string|null) pairs, optional)
+- `cwd` (string, optional)
+- `readySelector` (selector, optional)
+- `readyTimeoutMs` (int, optional)
+- `readyPollIntervalMs` (int, optional)
 
 Example:
 
 ```json
-{"method":"launch","params":{"command":"sh","args":[],"env":{"APP_MODE":"test"}}}
+{"method":"launch","params":{"command":"sh","args":[],"env":{"APP_MODE":"test","CLAUDECODE":null},"cwd":"."}}
 ```
 
-`env` values override inherited process env variables for that launch.
+`env` string values override inherited process env variables for that launch.
+`env` null values unset inherited variables for that launch.
 
 ### 9.2 `sendKey` format
 
@@ -305,9 +325,13 @@ Accepted string forms:
 {"type":"exact","text":"Ready"}
 {"type":"regex","pattern":"Ready|Done"}
 {"type":"at","col":10,"row":2}
-{"type":"within","rect":{"col":0,"row":0,"width":40,"height":10},"selector":{"type":"exact","text":"Ready"}}
+{"type":"within","rect":{"col":1,"row":1,"width":40,"height":10},"selector":{"type":"exact","text":"Ready"}}
 {"type":"nth","index":1,"selector":{"type":"exact","text":"Task"}}
 ```
+
+Coordinate notes:
+- server row/col coordinates are 1-based
+- `currentView` row/col filters support `0` wildcard for entire row/column ranges
 
 ### 9.4 Shutdown semantics
 

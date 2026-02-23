@@ -4,41 +4,22 @@ This document describes the implemented `tuispec server` JSON-RPC behavior.
 
 ## Goals
 
-- Add `tuispec server` for interactive TUI orchestration over stdin/stdout.
-- Speak JSON-RPC 2.0 using the Hackage package `jsonrpc` (module `JSONRPC`).
-- Support one active PTY-backed session per server process.
-- Expose methods matching the DSL surface so agents can drive TUIs interactively.
-- Use `--artifact-dir` as the base output path for dumped views and metadata.
+- Run interactive PTY-backed TUI sessions over JSON-RPC 2.0.
+- Keep one active session per server process.
+- Provide launch/input/wait/snapshot APIs plus utility methods for batching,
+  notifications, and JSONL recording/replay.
 
 ## Transport
 
 - Framing: newline-delimited JSON objects (one JSON-RPC message per line).
 - Input: stdin.
 - Output: stdout.
-- Mode: request/response for v1 (no server notifications).
-
-## Dependency
-
-- Add dependency: `jsonrpc` (package `jsonrpc`, module `JSONRPC`).
-- Use protocol types/constants from `JSONRPC`:
-  - `JSONRPCRequest`
-  - `JSONRPCResponse`
-  - `JSONRPCError`
-  - `JSONRPCErrorInfo`
-  - `RequestId`
-  - `rPC_VERSION`
-  - `pARSE_ERROR`
-  - `iNVALID_REQUEST`
-  - `mETHOD_NOT_FOUND`
-  - `iNVALID_PARAMS`
-  - `iNTERNAL_ERROR`
+- Mode: request/response plus optional server notifications.
 
 ## CLI
 
-Add command:
-
 ```bash
-tuispec server --artifact-dir PATH [--cols N] [--rows N] [--timeout-seconds N] [--ambiguity-mode fail|first-visible]
+tuispec server --artifact-dir PATH [--cols N] [--rows N] [--timeout-seconds N] [--ambiguity-mode fail|first-visible|last-visible]
 ```
 
 Defaults:
@@ -51,9 +32,15 @@ Defaults:
 ## Session Model
 
 - Single active session at a time.
-- Explicit session initialization method:
-  - `initialize`
-- Any non-lifecycle method requires an active session.
+- Initialize with `initialize`.
+- Non-lifecycle methods require an active session unless noted.
+
+## Coordinate Rules
+
+- Row/column coordinates in server APIs are 1-based.
+- `0` is reserved as a wildcard for row/column range selectors in `currentView`
+  filters (`entireRow`, `entireCol`, and `region`/`rows` wildcard forms).
+- Selector `at`/`within.rect` coordinates must be `>= 1`.
 
 ## Method Surface
 
@@ -66,7 +53,7 @@ Defaults:
       - `timeoutSeconds`
       - `terminalCols`
       - `terminalRows`
-      - `ambiguityMode`
+      - `ambiguityMode` (`fail|first|first-visible|last|last-visible`)
       - `snapshotTheme`
       - `updateSnapshots`
   - result:
@@ -75,33 +62,60 @@ Defaults:
     - `rows`
     - `cols`
 
-### Orchestration
-
 - `launch`
   - params:
-    - `command`
-    - `args`
-    - optional `env` object (string-to-string map)
+    - `command` (required)
+    - `args` (optional, default `[]`)
+    - `env` (optional object of `string -> string|null`)
+      - string value: set/override
+      - `null`: unset inherited env var
+    - `cwd` (optional)
+    - `readySelector` (optional selector)
+    - `readyTimeoutMs` (optional)
+    - `readyPollIntervalMs` (optional)
+  - result:
+    - `ok`
+
+### Input / Wait
 
 - `sendKey`
-  - params:
-    - `key` (string)
-  - accepted forms:
-    - `Enter`, `Esc`, `Tab`, `Backspace`
-    - `ArrowUp`, `ArrowDown`, `ArrowLeft`, `ArrowRight`
-    - `F1`..`F12`
-    - `Ctrl+X`, `Alt+X`
-    - single char like `"a"`
+  - params: `key`
 
 - `sendText`
-  - params:
-    - `text`
+  - params: `text`
 
 - `sendLine`
   - params:
     - `text`
+    - optional `expectAfter` selector
+    - optional `timeoutMs`
+    - optional `pollIntervalMs`
+    - optional `ambiguityMode`
+  - result: `ok`
+
+- `waitForText`
+  - params:
+    - `selector`
+    - optional `timeoutMs`
+    - optional `pollIntervalMs`
+    - optional `ambiguityMode`
+  - result: `ok`
+
+- `waitUntil`
+  - params:
+    - `pattern` (regex-like pattern over full `currentView.text`)
+    - optional `timeoutMs`
+    - optional `pollIntervalMs`
+  - result: `ok`
+
+### View / Snapshot
 
 - `currentView`
+  - optional params (choose exactly one filter mode):
+    - `rows`: `{ "start": Int, "end": Int }`
+    - `region`: `{ "col": Int, "row": Int, "width": Int, "height": Int }`
+    - `entireRow`: `Int`
+    - `entireCol`: `Int`
   - result:
     - `text`
     - `rows`
@@ -110,41 +124,123 @@ Defaults:
 - `dumpView`
   - params:
     - `name`
+    - optional `format`: `ansi|png|both` (default `ansi`)
+    - optional render overrides for PNG mode:
+      - `theme`
+      - `font`
+      - `rows`
+      - `cols`
+  - result:
+    - `snapshotPath` (canonical)
+    - `metaPath` (canonical)
+    - `artifactRoot` (canonical)
+    - optional `pngPath`
+
+- `renderView`
+  - params:
+    - `name`
+    - optional render overrides: `theme`, `font`, `rows`, `cols`
   - result:
     - `snapshotPath`
     - `metaPath`
+    - `pngPath`
+    - `artifactRoot`
 
-Launch env behavior:
-- `env` is optional
-- when present, values override inherited process environment variables for that launch
-- `TERM=xterm-256color` is still enforced by the runner
-
-### Assertions / waits
-
-- `expectVisible`
+- `diffView`
   - params:
-    - `selector`
-
-- `expectNotVisible`
-  - params:
-    - `selector`
-
-- `waitForText`
-  - params:
-    - `selector`
-    - optional `timeoutMs`
-    - optional `pollIntervalMs`
-  - behavior:
-    - matches on rendered viewport text (ANSI control/style escapes are interpreted)
+    - `leftPath`
+    - `rightPath`
+    - optional `mode`: `text|styled` (default `text`)
+  - result:
+    - `changed`
+    - `changedLines`
+    - `summary`
 
 - `expectSnapshot`
-  - params:
-    - `name`
+  - params: `name`
   - result:
     - `ok`
-    - plus snapshot paths where available
+    - `actualPath`
+    - `baselinePath`
+    - `baselineExists`
 
-### Server utility
+### Assertions
+
+- `expectVisible`
+  - params: `selector`
+  - result: `ok`
+
+- `expectNotVisible`
+  - params: `selector`
+  - result: `ok`
+
+### Notifications
+
+- `viewSubscribe`
+  - params (optional):
+    - `debounceMs` (default `100`)
+    - `includeText` (default `false`)
+  - result:
+    - `ok`
+    - `debounceMs`
+    - `includeText`
+
+- `viewUnsubscribe`
+  - params: none
+  - result: `ok`
+
+When subscribed, the server emits JSON-RPC notifications:
+
+```json
+{"jsonrpc":"2.0","method":"view.changed","params":{"rows":40,"cols":134}}
+```
+
+If `includeText=true`, notification params also include `text`.
+
+### Batch
+
+- `batch`
+  - params:
+    - `steps`: array of `{ "method": Text, "params": Value }`
+  - execution model:
+    - sequential
+    - non-atomic
+    - stop on first failure
+  - result:
+    - on success: `{ "ok": true, "completed": N, "results": [...] }`
+    - on failure: `{ "ok": false, "completed": N, "results": [...], "errorStep": K, "error": {...} }`
+
+### Recording / Replay (JSONL)
+
+- `recording.start`
+  - params: `{ "path": FilePath }`
+  - result: `{ "ok": true, "path": FilePath }`
+
+- `recording.stop`
+  - params: none
+  - result: `{ "ok": true }`
+
+- `recording.status`
+  - params: none
+  - result: `{ "active": Bool, "path": FilePath|null }`
+
+- `replay`
+  - params:
+    - `path`
+    - optional `speed`: `as-fast-as-possible|real-time`
+  - result:
+    - `ok`
+    - `replayedRequests`
+    - `path`
+    - `speed`
+
+Recording files are JSONL with one event per line and include:
+
+- `timestampMicros`
+- `direction` (`request|response|notification`)
+- `line` (raw JSON-RPC line)
+
+### Server Utility
 
 - `server.ping`
   - result:
@@ -156,26 +252,18 @@ Launch env behavior:
     - `shuttingDown: true`
   - then hard-shutdown:
     - send `SIGKILL` to active child process group
-    - exit process immediately (no graceful wait)
-
-## Signal behavior
-
-- On `SIGHUP`, server does hard-shutdown:
-  - send `SIGKILL` to active child process group
-  - exit immediately
+    - exit process immediately
 
 ## Selector Encoding
-
-Use tagged object format:
 
 - exact:
   - `{"type":"exact","text":"Ready"}`
 - regex:
   - `{"type":"regex","pattern":"Ready|Done"}`
-- at:
+- at (1-based):
   - `{"type":"at","col":10,"row":2}`
-- within:
-  - `{"type":"within","rect":{"col":0,"row":0,"width":40,"height":10},"selector":{...}}`
+- within (1-based origin):
+  - `{"type":"within","rect":{"col":1,"row":1,"width":40,"height":10},"selector":{...}}`
 - nth:
   - `{"type":"nth","index":1,"selector":{...}}`
 
@@ -187,37 +275,17 @@ JSON-RPC errors:
 - invalid request: `iNVALID_REQUEST`
 - unknown method: `mETHOD_NOT_FOUND`
 - bad params: `iNVALID_PARAMS`
-- internal failures: `iNTERNAL_ERROR`
 
-Server-domain error codes:
+Server-domain codes:
 
-- `-32001` `NoActiveSession`
-- `-32002` `SessionAlreadyStarted`
-- `-32004` `MethodFailed`
+- `-32001` no active session
+- `-32002` session already started
+- `-32004` method failed
 
-Error `data` should include:
+## Signal Behavior
 
-- `kind`
-- `details`
-- optional `hint`
+On `SIGHUP`, server does hard-shutdown:
 
-## Artifact Layout
-
-With `--artifact-dir X` and session `foo`:
-
-- `X/sessions/foo/snapshots/<name>.ansi.txt`
-- `X/sessions/foo/snapshots/<name>.meta.json`
-
-`dumpView` writes only run artifacts.  
-`expectSnapshot` keeps existing DSL baseline semantics unless changed later.
-
-## Validation
-
-- Build/tests:
-  - `cabal build`
-  - `cabal test`
-  - `(cd example && cabal test)`
-- Manual server smoke:
-  - start `tuispec server`
-  - send `initialize`, `launch`, `sendKey`, `dumpView`, `server.shutdown`
-  - verify artifact files and response payloads
+- send `SIGKILL` to active child process group
+- close recording handle
+- exit immediately

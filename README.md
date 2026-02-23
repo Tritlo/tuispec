@@ -26,6 +26,8 @@ using `tuispec`:
 - **Text selectors** — `Exact`, `Regex`, `At`, `Within`, `Nth`
 - **`tasty` integration** — tests are regular `tasty` test trees
 - **JSON-RPC server** — agentic orchestration of TUIs via `tuispec server`
+- **Server notifications** — optional `view.changed` push events (debounced)
+- **Batch + replay** — JSON-RPC batch execution and JSONL recording/replay
 - **REPL sessions** — ad-hoc exploration with `withTuiSession`
 
 ## Quick start
@@ -166,16 +168,21 @@ End-to-end session example:
 ```bash
 cat <<'JSON' | cabal run tuispec -- server --artifact-dir artifacts/server
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"name":"rpc-demo","terminalCols":134,"terminalRows":40}}
-{"jsonrpc":"2.0","id":2,"method":"launch","params":{"command":"sh","args":[],"env":{"DEMO_FLAG":"1"}}}
+{"jsonrpc":"2.0","id":2,"method":"launch","params":{"command":"sh","args":["-lc","printf 'READY\\n'; exec sh"],"cwd":".","env":{"DEMO_FLAG":"1","CLAUDECODE":null},"readySelector":{"type":"exact","text":"READY"}}}
 {"jsonrpc":"2.0","id":3,"method":"sendLine","params":{"text":"printf 'hello from rpc\\n'"}}
 {"jsonrpc":"2.0","id":4,"method":"waitForText","params":{"selector":{"type":"exact","text":"hello from rpc"}}}
-{"jsonrpc":"2.0","id":5,"method":"dumpView","params":{"name":"after-hello"}}
-{"jsonrpc":"2.0","id":6,"method":"server.shutdown","params":{}}
+{"jsonrpc":"2.0","id":5,"method":"dumpView","params":{"name":"after-hello","format":"both"}}
+{"jsonrpc":"2.0","id":6,"method":"currentView","params":{"entireRow":1}}
+{"jsonrpc":"2.0","id":7,"method":"server.shutdown","params":{}}
 JSON
 ```
 
-`launch.params.env` is optional. When provided, those variables override the
-inherited process environment for that launch.
+`launch.params.env` is optional. Values set/override inherited variables and
+`null` unsets inherited variables for that launch. `launch.params.cwd` sets the
+child working directory.
+
+`currentView` coordinates are 1-based. For row/col-oriented filters, `0` means
+"entire row range" / "entire column range".
 
 Input examples:
 
@@ -183,6 +190,12 @@ Input examples:
 {"jsonrpc":"2.0","id":7,"method":"sendKey","params":{"key":"+"}}
 {"jsonrpc":"2.0","id":8,"method":"sendKey","params":{"key":"Ctrl+C"}}
 {"jsonrpc":"2.0","id":9,"method":"sendText","params":{"text":"hello"}}
+```
+
+Replay a recording JSONL file:
+
+```bash
+cabal run tuispec -- replay artifacts/server-tests/recording/session.jsonl --speed as-fast-as-possible
 ```
 
 ## REPL-style sessions
