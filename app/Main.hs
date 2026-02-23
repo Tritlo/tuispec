@@ -2,7 +2,9 @@ module Main where
 
 import Data.List (isSuffixOf)
 import Data.Text.IO qualified as TIO
+import Data.Version (showVersion)
 import Options.Applicative
+import Paths_tuispec (version)
 import Text.Read (readMaybe)
 import TuiSpec.Render (renderAnsiSnapshotFileWithFont, renderAnsiSnapshotTextFile)
 import TuiSpec.Replay (ReplaySpeed (ReplayAsFastAsPossible, ReplayRealTime), readRecordingEvents, replayRecordedRequests)
@@ -77,7 +79,7 @@ runCommand parsedCommand =
 commandParserInfo :: ParserInfo Command
 commandParserInfo =
     info
-        (parseCommand <**> helper)
+        (parseCommand <**> simpleVersioner (showVersion version) <**> helper)
         ( fullDesc
             <> progDesc "Render ANSI snapshot artifacts to PNG"
             <> header "tuispec"

@@ -40,8 +40,8 @@ extra-doc-files:
   SERVER.md
   SKILL.md
   SPEC.md
-  doc/example-dashboard-ioskeley-dark.png
   doc/example-board-ioskeley-light.png
+  doc/example-dashboard-ioskeley-dark.png
 
 source-repository head
   type: git
@@ -56,8 +56,8 @@ library
   hs-source-dirs: src
   exposed-modules:
     TuiSpec
-    TuiSpec.Replay
     TuiSpec.Render
+    TuiSpec.Replay
     TuiSpec.Runner
     TuiSpec.Server
     TuiSpec.Types
@@ -85,6 +85,8 @@ executable tuispec
   import: common-settings
   hs-source-dirs: app
   main-is: Main.hs
+  autogen-modules: Paths_tuispec
+  other-modules: Paths_tuispec
   build-depends:
     base >=4.16 && <5,
     optparse-applicative >=0.18 && <0.20,
