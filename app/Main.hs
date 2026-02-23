@@ -3,7 +3,7 @@ module Main where
 import Data.List (isSuffixOf)
 import Options.Applicative
 import Text.Read (readMaybe)
-import TuiSpec.Render (renderAnsiSnapshotFile, renderAnsiSnapshotTextFile)
+import TuiSpec.Render (renderAnsiSnapshotFileWithFont, renderAnsiSnapshotTextFile)
 import TuiSpec.Server qualified as Server
 import TuiSpec.Types (AmbiguityMode (FailOnAmbiguous, FirstVisibleMatch))
 
@@ -16,6 +16,7 @@ data RenderOptions = RenderOptions
     { inputPath :: FilePath
     , outputPath :: Maybe FilePath
     , themeName :: Maybe String
+    , fontPath :: Maybe FilePath
     , cols :: Maybe Int
     , rows :: Maybe Int
     }
@@ -45,7 +46,7 @@ runCommand parsedCommand =
     case parsedCommand of
         Render options -> do
             let outPath = maybe (defaultOutputPath (inputPath options)) id (outputPath options)
-            renderAnsiSnapshotFile (rows options) (cols options) (themeName options) (inputPath options) outPath
+            renderAnsiSnapshotFileWithFont (fontPath options) (rows options) (cols options) (themeName options) (inputPath options) outPath
             putStrLn ("Rendered " <> outPath)
         RenderText options -> do
             let outPath = maybe (defaultTextOutputPath (textInputPath options)) id (textOutputPath options)
@@ -113,6 +114,13 @@ parseRenderOptions =
                 ( long "theme"
                     <> metavar "THEME"
                     <> help "Theme override: auto|dark|light (default: metadata, then auto)"
+                )
+            )
+        <*> optional
+            ( strOption
+                ( long "font"
+                    <> metavar "FONT_PATH"
+                    <> help "TTF/TTC font path override for PNG rendering (default: system fallback fonts)"
                 )
             )
         <*> optional

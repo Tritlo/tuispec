@@ -15,7 +15,8 @@ target app.
 Snapshots captured from the included [Brick demo app](example/app/Main.hs)
 using `tuispec`:
 
-![Board snapshot](doc/example-board.png)
+![Board snapshot (IoskeleyMono, light theme)](doc/example-board-ioskeley-light.png)
+![Dashboard snapshot (IoskeleyMono, dark theme)](doc/example-dashboard-ioskeley-dark.png)
 
 ## Features
 
@@ -24,7 +25,7 @@ using `tuispec`:
 - **Snapshot assertions** — baseline comparison with ANSI text + PNG artifacts
 - **Text selectors** — `Exact`, `Regex`, `At`, `Within`, `Nth`
 - **`tasty` integration** — tests are regular `tasty` test trees
-- **JSON-RPC server** — interactive orchestration via `tuispec server`
+- **JSON-RPC server** — agentic orchestration of TUIs via `tuispec server`
 - **REPL sessions** — ad-hoc exploration with `withTuiSession`
 
 ## Quick start
@@ -127,6 +128,12 @@ Render any ANSI snapshot to PNG:
 cabal run tuispec -- render artifacts/tests/my-test/snapshots/<snapshot>.ansi.txt
 ```
 
+Specify an explicit font file:
+
+```bash
+cabal run tuispec -- render --font /path/to/YourMono.ttf artifacts/tests/my-test/snapshots/<snapshot>.ansi.txt
+```
+
 Render visible plain text:
 
 ```bash
@@ -139,8 +146,37 @@ cabal run tuispec -- render-text artifacts/tests/my-test/snapshots/<snapshot>.an
 cabal run tuispec -- server --artifact-dir artifacts/server
 ```
 
-Newline-delimited JSON-RPC 2.0 on stdin/stdout. See [SERVER.md](SERVER.md) for
-the full protocol reference.
+Newline-delimited JSON-RPC 2.0 on stdin/stdout for agentic orchestration of
+TUIs. See [SERVER.md](SERVER.md) for the full protocol reference.
+
+Ping example:
+
+```bash
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"server.ping","params":{}}' \
+  | cabal run tuispec -- server --artifact-dir artifacts/server
+```
+
+End-to-end session example:
+
+```bash
+cat <<'JSON' | cabal run tuispec -- server --artifact-dir artifacts/server
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"name":"rpc-demo","terminalCols":134,"terminalRows":40}}
+{"jsonrpc":"2.0","id":2,"method":"launch","params":{"command":"sh","args":[]}}
+{"jsonrpc":"2.0","id":3,"method":"sendLine","params":{"text":"printf 'hello from rpc\\n'"}}
+{"jsonrpc":"2.0","id":4,"method":"waitForText","params":{"selector":{"type":"exact","text":"hello from rpc"}}}
+{"jsonrpc":"2.0","id":5,"method":"dumpView","params":{"name":"after-hello"}}
+{"jsonrpc":"2.0","id":6,"method":"server.shutdown","params":{}}
+JSON
+```
+
+Input examples:
+
+```json
+{"jsonrpc":"2.0","id":7,"method":"sendKey","params":{"key":"+"}}
+{"jsonrpc":"2.0","id":8,"method":"sendKey","params":{"key":"Ctrl+C"}}
+{"jsonrpc":"2.0","id":9,"method":"sendText","params":{"text":"hello"}}
+```
 
 ## REPL-style sessions
 
@@ -175,6 +211,7 @@ withTuiSession defaultRunOptions "demo" $ \tui -> do
 - GHC 9.12+
 - Linux terminal environment (PTY-based)
 - `python3` with Pillow for PNG rendering
+- a host monospace TTF/TTC font (or pass `--font`, or `TUISPEC_FONT_PATH`)
 
 ## License
 

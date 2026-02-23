@@ -11,25 +11,26 @@ can still be supplied when needed.
 -}
 module TuiSpec.Render (
     renderAnsiSnapshotFile,
+    renderAnsiSnapshotFileWithFont,
     renderAnsiSnapshotTextFile,
 ) where
 
+import Control.Applicative ((<|>))
 import Control.Exception (SomeException, catch, throwIO)
 import Data.Aeson (FromJSON (parseJSON), eitherDecode, withObject, (.:))
 import Data.ByteString.Lazy qualified as BL
 import Data.Char (toLower)
-import Data.List (isSuffixOf)
+import Data.List (intercalate, isSuffixOf)
 import Data.Maybe (fromMaybe)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import System.Directory (createDirectoryIfMissing, doesFileExist, removeFile)
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode (ExitSuccess))
-import System.FilePath (isRelative, takeDirectory, (</>))
+import System.FilePath (takeDirectory)
 import System.IO (hClose, openTempFile)
 import System.Process (proc, readCreateProcessWithExitCode)
 import Text.Read (readMaybe)
-import TuiSpec.ProjectRoot (resolveProjectRoot)
 import TuiSpec.Runner (renderAnsiViewportText, serializeAnsiSnapshot)
 import TuiSpec.Types (defaultRunOptions, terminalCols, terminalRows)
 
@@ -45,10 +46,14 @@ Theme is rendering-only and defaults to @auto@ when omitted.
 -}
 renderAnsiSnapshotFile :: Maybe Int -> Maybe Int -> Maybe String -> FilePath -> FilePath -> IO ()
 renderAnsiSnapshotFile rowOverride colOverride themeOverride ansiPath outPath = do
+    renderAnsiSnapshotFileWithFont Nothing rowOverride colOverride themeOverride ansiPath outPath
+
+renderAnsiSnapshotFileWithFont :: Maybe FilePath -> Maybe Int -> Maybe Int -> Maybe String -> FilePath -> FilePath -> IO ()
+renderAnsiSnapshotFileWithFont maybeFontPath rowOverride colOverride themeOverride ansiPath outPath = do
     ansiText <- TIO.readFile ansiPath
     (rows, cols, effectiveTheme) <- resolveRenderOptions rowOverride colOverride themeOverride ansiPath
     let payload = serializeAnsiSnapshot rows cols effectiveTheme ansiText
-    fontPath <- resolveFontPath
+    fontPath <- resolveFontPath maybeFontPath
     createDirectoryIfMissing True (takeDirectory outPath)
     (tmpInPath, tmpHandle) <- openTempFile (takeDirectory outPath) "snapshot-styled-"
     TIO.hPutStr tmpHandle (T.pack payload)
@@ -175,27 +180,55 @@ pythonStyledRenderScript =
         , "img.save(out, 'PNG')"
         ]
 
-resolveFontPath :: IO FilePath
-resolveFontPath = do
-    projectRoot <- resolveProjectRoot
+resolveFontPath :: Maybe FilePath -> IO FilePath
+resolveFontPath maybeFontPath = do
     envFont <- lookupEnv "TUISPEC_FONT_PATH"
-    let configuredPath =
-            case envFont of
-                Just pathValue
-                    | isRelative pathValue -> projectRoot </> pathValue
-                    | otherwise -> pathValue
-                Nothing -> projectRoot </> "fonts" </> "IosevkaMono-Regular.ttc"
-    exists <- doesFileExist configuredPath
-    if exists
-        then pure configuredPath
-        else
-            throwIO
-                ( userError
-                    ( "Font not found at "
-                        <> configuredPath
-                        <> ". Set TUISPEC_FONT_PATH or add fonts/IosevkaMono-Regular.ttc."
-                    )
-                )
+    case maybeFontPath <|> envFont of
+        Just pathValue -> do
+            exists <- doesFileExist pathValue
+            if exists
+                then pure pathValue
+                else
+                    throwIO
+                        ( userError
+                            ( "Font not found at "
+                                <> pathValue
+                                <> ". Pass --font PATH or set TUISPEC_FONT_PATH to a valid file."
+                            )
+                        )
+        Nothing -> do
+            maybeFont <- findFirstExistingPath defaultFallbackFontPaths
+            case maybeFont of
+                Just fontPath -> pure fontPath
+                Nothing ->
+                    throwIO
+                        ( userError
+                            ( "Font not found. Looked for: "
+                                <> intercalate ", " defaultFallbackFontPaths
+                                <> ". Pass --font PATH or set TUISPEC_FONT_PATH to override."
+                            )
+                        )
+
+findFirstExistingPath :: [FilePath] -> IO (Maybe FilePath)
+findFirstExistingPath paths =
+    case paths of
+        [] -> pure Nothing
+        candidate : rest -> do
+            exists <- doesFileExist candidate
+            if exists
+                then pure (Just candidate)
+                else findFirstExistingPath rest
+
+defaultFallbackFontPaths :: [FilePath]
+defaultFallbackFontPaths =
+    [ "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
+    , "/usr/share/fonts/dejavu/DejaVuSansMono.ttf"
+    , "/usr/share/fonts/TTF/DejaVuSansMono.ttf"
+    , "/usr/share/fonts/truetype/liberation2/LiberationMono-Regular.ttf"
+    , "/usr/share/fonts/liberation/LiberationMono-Regular.ttf"
+    , "/System/Library/Fonts/Menlo.ttc"
+    , "/Library/Fonts/Menlo.ttc"
+    ]
 
 resolveAutoSnapshotTheme :: String -> Maybe String -> String
 resolveAutoSnapshotTheme requestedTheme colorFgBgValue =

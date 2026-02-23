@@ -222,7 +222,7 @@ CLI command: `tuispec render`
 - input: ANSI snapshot (`.ansi.txt`)
 - output: PNG
 - metadata (`rows`, `cols`) auto-loaded from adjacent `.meta.json`
-- optional overrides: `--rows`, `--cols`, `--theme`
+- optional overrides: `--rows`, `--cols`, `--theme`, `--font`
 
 CLI command: `tuispec render-text`
 - input: ANSI snapshot
@@ -231,8 +231,10 @@ CLI command: `tuispec render-text`
 
 PNG renderer implementation details:
 - uses `python3` + Pillow
-- uses `fonts/IosevkaMono-Regular.ttc` by default
-- `TUISPEC_FONT_PATH` can override font path
+- resolves font in this order:
+  - `--font`
+  - `TUISPEC_FONT_PATH`
+  - built-in system fallback font paths
 
 ## 9. JSON-RPC Server
 

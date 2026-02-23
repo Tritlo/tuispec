@@ -10,16 +10,17 @@ copyright: 2026 Matthias Pall Gissurarson
 synopsis: Playwright-like black-box testing for terminal UIs over PTY
 description:
   @tuispec@ is a Haskell framework for black-box testing of terminal user
-  interfaces (TUIs) over PTY. It provides a Playwright-inspired DSL for
-  launching apps, sending keystrokes, waiting for text, and capturing
-  snapshots (ANSI text + PNG).
+  interfaces (TUIs) over PTY.
   .
-  Tests are regular compiled Haskell programs using @tasty@, with per-test
+  It provides a Playwright-inspired DSL for launching apps, sending
+  keystrokes, waiting for text, and capturing snapshots (ANSI text + PNG).
+  .
+  Tests are regular compiled Haskell programs using @tasty@ with per-test
   isolation via fresh PTY processes. The framework is generic to any TUI
-  binary runnable from a shell — no framework instrumentation needed inside
-  the target app.
+  binary runnable from a shell, with no instrumentation required inside the
+  target app.
   .
-  Features:
+  Features include:
   .
   * PTY transport with per-test isolation
   * Text selectors (@Exact@, @Regex@, @At@, @Within@, @Nth@)
@@ -39,12 +40,8 @@ extra-doc-files:
   SERVER.md
   SKILL.md
   SPEC.md
-  doc/example-board.png
-  doc/example-dashboard.png
-
-extra-source-files:
-  fonts/IosevkaMono-Regular.ttc
-  fonts/LICENSE
+  doc/example-dashboard-ioskeley-dark.png
+  doc/example-board-ioskeley-light.png
 
 source-repository head
   type: git
