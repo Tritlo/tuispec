@@ -7,6 +7,31 @@ This skill explains how to use `tuispec` as a REPL-like driver for TUIs:
 3. periodically dump current view snapshots
 4. render those snapshots as text/PNG
 
+## Viewing snapshots — prefer PNG
+
+**Always render snapshots to PNG and view the image file** rather than
+reading the plain-text `.txt` or `.ansi.txt` representation. A single PNG
+gives you the complete visual state of the TUI (layout, colors, borders)
+while consuming far less context than the equivalent text grid (a 160×50
+viewport is ~8 000 characters of text but a single image token as PNG).
+
+Workflow:
+
+```bash
+# Render a snapshot to PNG (output defaults to same path with .png extension)
+cabal run tuispec -- render path/to/snapshot.ansi.txt
+
+# Then view the PNG (use your image-reading tool / Read tool)
+```
+
+When using the JSON-RPC server, request `"format":"png"` or
+`"format":"both"` in `dumpView` so the PNG is generated in one step.
+Then read the returned `pngPath` instead of the text path.
+
+Only fall back to `render-text` or `currentView` text when you need to
+do programmatic string matching (e.g. searching for a selector or
+extracting a specific value from the viewport).
+
 ## What was added for REPL ergonomics
 
 Use these APIs from `TuiSpec`:
@@ -85,13 +110,14 @@ For session name `demo-session` and `artifactsDir = artifacts/repl`:
 
 ## Render dumps while iterating
 
-Render to PNG:
+Render to PNG (preferred — compact, full-fidelity):
 
 ```bash
 cabal run tuispec -- render artifacts/repl/sessions/demo-session/snapshots/01-board.ansi.txt
+# Then read the .png file to see the TUI state
 ```
 
-Render to visible plain text:
+Render to visible plain text (only when you need string matching):
 
 ```bash
 cabal run tuispec -- render-text artifacts/repl/sessions/demo-session/snapshots/01-board.ansi.txt
@@ -102,7 +128,7 @@ Both commands auto-read rows/cols from `.meta.json`.
 ## Practical loop
 
 1. run your REPL script
-2. inspect generated `.txt`/`.png`
+2. render snapshots to PNG and view the images
 3. tweak interactions
 4. run again
 

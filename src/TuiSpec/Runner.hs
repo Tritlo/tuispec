@@ -515,7 +515,11 @@ withTerminalEnv envOverrides = do
                         (\acc (key, value) -> applyEnvOverride key value acc)
                         existing
                         overrides
-    pure (applyEnvOverride "TERM" (Just "xterm-256color") merged)
+    pure
+        ( applyEnvOverride "COLORTERM" Nothing
+            . applyEnvOverride "TERM" (Just "xterm-256color")
+            $ merged
+        )
   where
     applyEnvOverride key maybeValue pairs =
         case maybeValue of
@@ -775,7 +779,12 @@ drainPtyOutput pty = BS.concat . reverse <$> go 0 []
                         _ ->
                             pure acc
 
-data EmuColor = EmuColor Int Int Int
+{- | A terminal color, either an exact RGB triple or a palette index (0–15)
+that is resolved against the active 'ThemePalette' at render time.
+-}
+data EmuColor
+    = EmuColor Int Int Int
+    | EmuPaletteColor Int
 
 data EmuCellStyle = EmuCellStyle
     { cellFg :: Maybe EmuColor
@@ -903,21 +912,21 @@ themePalette PtyDefaultLight =
         , paletteDefaultFg = EmuColor 0 0 0
         , paletteAnsi16 =
             [ EmuColor 0 0 0
-            , EmuColor 205 0 0
-            , EmuColor 0 205 0
-            , EmuColor 205 205 0
-            , EmuColor 0 0 238
-            , EmuColor 205 0 205
-            , EmuColor 0 205 205
-            , EmuColor 229 229 229
-            , EmuColor 127 127 127
-            , EmuColor 255 0 0
-            , EmuColor 0 255 0
-            , EmuColor 255 255 0
-            , EmuColor 92 92 255
-            , EmuColor 255 0 255
-            , EmuColor 0 255 255
-            , EmuColor 255 255 255
+            , EmuColor 205 49 49
+            , EmuColor 0 188 0
+            , EmuColor 148 152 0
+            , EmuColor 4 81 165
+            , EmuColor 188 5 188
+            , EmuColor 5 152 188
+            , EmuColor 85 85 85
+            , EmuColor 102 102 102
+            , EmuColor 205 49 49
+            , EmuColor 20 158 20
+            , EmuColor 158 152 0
+            , EmuColor 4 81 165
+            , EmuColor 188 5 188
+            , EmuColor 5 152 188
+            , EmuColor 165 165 165
             ]
         }
 
@@ -959,19 +968,29 @@ defaultStyledCell theme =
             , styledBgColor = paletteDefaultBg palette
             }
 
+{- | Resolve an 'EmuColor' against the theme palette.
+
+'EmuPaletteColor' indices are looked up in the theme's 16-color table;
+literal 'EmuColor' RGB triples pass through unchanged.
+-}
+resolveColor :: ThemePalette -> EmuColor -> EmuColor
+resolveColor _ (EmuColor r g b) = EmuColor r g b
+resolveColor palette (EmuPaletteColor code) =
+    fromMaybe (EmuColor 0 0 0) (safeIndex code (paletteAnsi16 palette))
+
 resolveCellFg :: SnapshotTheme -> EmuCellStyle -> EmuColor
 resolveCellFg theme styleValue =
     if cellReverse styleValue
-        then fromMaybe (paletteDefaultBg palette) (cellBg styleValue)
-        else fromMaybe (paletteDefaultFg palette) (cellFg styleValue)
+        then maybe (paletteDefaultBg palette) (resolveColor palette) (cellBg styleValue)
+        else maybe (paletteDefaultFg palette) (resolveColor palette) (cellFg styleValue)
   where
     palette = themePalette theme
 
 resolveCellBg :: SnapshotTheme -> EmuCellStyle -> EmuColor
 resolveCellBg theme styleValue =
     if cellReverse styleValue
-        then fromMaybe (paletteDefaultFg palette) (cellFg styleValue)
-        else fromMaybe (paletteDefaultBg palette) (cellBg styleValue)
+        then maybe (paletteDefaultFg palette) (resolveColor palette) (cellFg styleValue)
+        else maybe (paletteDefaultBg palette) (resolveColor palette) (cellBg styleValue)
   where
     palette = themePalette theme
 
@@ -1172,23 +1191,22 @@ applySgr stateValue params =
         colorSafe value = max 0 (min 255 value)
 
         mapBasicColor code
-            | code >= 0 && code < 16 =
-                fromMaybe
-                    (EmuColor 0 0 0)
-                    (safeIndex code (paletteAnsi16 (themePalette defaultSnapshotTheme)))
+            | code >= 0 && code < 16 = EmuPaletteColor code
             | otherwise = EmuColor 0 0 0
 
-        colorFromCode value =
-            EmuColor r g b
-          where
-            (r, g, b) = ansiColorFromCode value
+        colorFromCode value
+            | value >= 0 && value < 16 = EmuPaletteColor value
+            | otherwise =
+                let (r, g, b) = ansiColorFromCode value
+                 in EmuColor r g b
 
+{- | Convert a 256-color code (16–255) to an RGB triple.
+
+Palette colors 0–15 are theme-dependent and handled separately as
+'EmuPaletteColor' indices.
+-}
 ansiColorFromCode :: Int -> (Int, Int, Int)
 ansiColorFromCode value
-    | value >= 0 && value < 16 =
-        let EmuColor rValue gValue bValue =
-                fromMaybe (EmuColor 0 0 0) (safeIndex value (paletteAnsi16 (themePalette defaultSnapshotTheme)))
-         in (rValue, gValue, bValue)
     | value >= 16 && value <= 231 =
         let level v = (v * 51)
             rValue = level ((value - 16) `div` 36)
@@ -1199,6 +1217,7 @@ ansiColorFromCode value
         let gray = 8 + (value - 232) * 10
          in (gray, gray, gray)
     | otherwise = (0, 0, 0)
+
 parseCsiParams :: String -> [Int]
 parseCsiParams value =
     case splitOnSemicolon value of
@@ -1378,10 +1397,12 @@ serializeSnapshot theme stateValue =
             <> "]"
 
     colorJson colorValue =
-        let EmuColor rValue gValue bValue = colorValue
-         in "["
-                <> intercalate "," (map show [rValue, gValue, bValue])
-                <> "]"
+        case colorValue of
+            EmuColor rValue gValue bValue ->
+                "[" <> intercalate "," (map show [rValue, gValue, bValue]) <> "]"
+            EmuPaletteColor _ ->
+                -- Palette colors should already be resolved before serialization.
+                "[0,0,0]"
 
 snapshotThemeName :: SnapshotTheme -> String
 snapshotThemeName PtyDefaultDark = "pty-default-dark"
