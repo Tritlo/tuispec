@@ -15,6 +15,7 @@ module TuiSpec.Replay (
     appendRecordingEvent,
     closeRecording,
     computeFrameDelta,
+    extractInputLabel,
     openRecording,
     streamReplayFrames,
     streamReplayRequests,
@@ -23,8 +24,9 @@ module TuiSpec.Replay (
 import Control.Concurrent (threadDelay)
 import Control.Exception (Exception, bracket, throwIO)
 import Control.Monad (when)
-import Data.Aeson (FromJSON (parseJSON), ToJSON (toJSON), Value (Array, Number, String), eitherDecodeStrict', encode, object, withObject, (.:), (.=))
+import Data.Aeson (FromJSON (parseJSON), ToJSON (toJSON), Value (Array, Number, Object, String), eitherDecodeStrict', encode, object, withObject, (.:), (.=))
 import Data.Aeson qualified as Aeson
+import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy qualified as BL
 import Data.IORef (newIORef, readIORef, writeIORef)
@@ -151,15 +153,18 @@ streamReplayRequests speed path runRequest =
 {- | Stream replay of frame events from a JSONL recording file. Handles
 both full keyframes (@frame@) and delta frames (@frame-delta@),
 reconstructing full viewport text before dispatching to the callback.
-Returns the total number of frames replayed.
+Request events are also tracked; the callback receives the last input
+label (if any) alongside each frame. Returns the total number of frames
+replayed.
 -}
-streamReplayFrames :: ReplaySpeed -> FilePath -> (Text -> IO ()) -> IO Int
+streamReplayFrames :: ReplaySpeed -> FilePath -> (Text -> Maybe Text -> IO ()) -> IO Int
 streamReplayFrames speed path showFrame =
     bracket (openFile path ReadMode) hClose $ \fileHandle -> do
         currentLinesRef <- newIORef ([] :: [Text])
-        go fileHandle currentLinesRef (1 :: Int) Nothing 0
+        lastInputRef <- newIORef (Nothing :: Maybe Text)
+        go fileHandle currentLinesRef lastInputRef (1 :: Int) Nothing 0
   where
-    go fileHandle currentLinesRef lineNumber maybePrev !count = do
+    go fileHandle currentLinesRef lastInputRef lineNumber maybePrev !count = do
         eof <- hIsEOF fileHandle
         if eof
             then pure count
@@ -167,27 +172,35 @@ streamReplayFrames speed path showFrame =
                 lineValue <- BS8.hGetLine fileHandle
                 let trimmed = TE.decodeUtf8 lineValue
                 if T.null (T.strip trimmed)
-                    then go fileHandle currentLinesRef (lineNumber + 1) maybePrev count
+                    then go fileHandle currentLinesRef lastInputRef (lineNumber + 1) maybePrev count
                     else case eitherDecodeStrict' lineValue of
                         Left err ->
                             throwIO
                                 (RecordingParseError path ("line " <> show lineNumber <> ": " <> err))
                         Right event
+                            | recordingDirection event == DirectionRequest -> do
+                                let label = extractInputLabel (recordingLine event)
+                                case label of
+                                    Just _ -> writeIORef lastInputRef label
+                                    Nothing -> pure ()
+                                go fileHandle currentLinesRef lastInputRef (lineNumber + 1) maybePrev count
                             | recordingDirection event == DirectionFrame -> do
                                 applyReplayDelay speed maybePrev event
                                 let frameLines = T.splitOn "\n" (recordingLine event)
                                 writeIORef currentLinesRef frameLines
-                                showFrame (recordingLine event)
-                                go fileHandle currentLinesRef (lineNumber + 1) (Just event) (count + 1)
+                                lastInput <- readIORef lastInputRef
+                                showFrame (recordingLine event) lastInput
+                                go fileHandle currentLinesRef lastInputRef (lineNumber + 1) (Just event) (count + 1)
                             | recordingDirection event == DirectionFrameDelta -> do
                                 applyReplayDelay speed maybePrev event
                                 baseLines <- readIORef currentLinesRef
                                 let updatedLines = applyDelta baseLines (recordingLine event)
                                 writeIORef currentLinesRef updatedLines
-                                showFrame (T.intercalate "\n" updatedLines)
-                                go fileHandle currentLinesRef (lineNumber + 1) (Just event) (count + 1)
+                                lastInput <- readIORef lastInputRef
+                                showFrame (T.intercalate "\n" updatedLines) lastInput
+                                go fileHandle currentLinesRef lastInputRef (lineNumber + 1) (Just event) (count + 1)
                             | otherwise ->
-                                go fileHandle currentLinesRef (lineNumber + 1) maybePrev count
+                                go fileHandle currentLinesRef lastInputRef (lineNumber + 1) maybePrev count
 
 -- | Internal: stream events matching a given direction from a JSONL file.
 streamFilteredEvents :: ReplaySpeed -> FilePath -> RecordingDirection -> (Text -> IO ()) -> IO Int
@@ -227,6 +240,43 @@ applyReplayDelay speed maybePrev event =
                 Just prev -> do
                     let delta = recordingTimestampMicros event - recordingTimestampMicros prev
                     when (delta > 0) $ threadDelay (fromIntegral delta)
+
+{- | Extract a human-readable input label from a JSON-RPC request line.
+Returns @Just label@ for input methods (@sendKey@, @sendText@, @sendLine@),
+@Nothing@ for non-input methods.
+-}
+extractInputLabel :: Text -> Maybe Text
+extractInputLabel rawLine =
+    case Aeson.eitherDecodeStrict' (TE.encodeUtf8 rawLine) of
+        Left _ -> Nothing
+        Right (Object obj) ->
+            case KM.lookup "method" obj of
+                Just (String method) -> extractFromMethod method obj
+                _ -> Nothing
+        Right _ -> Nothing
+  where
+    extractFromMethod method obj =
+        case KM.lookup "params" obj of
+            Just (Object params) ->
+                case method of
+                    "sendKey" ->
+                        case KM.lookup "key" params of
+                            Just (String k) -> Just ("Key: " <> k)
+                            _ -> Nothing
+                    "sendText" ->
+                        case KM.lookup "text" params of
+                            Just (String t) -> Just ("Text: " <> showTextValue t)
+                            _ -> Nothing
+                    "sendLine" ->
+                        case KM.lookup "text" params of
+                            Just (String t) -> Just ("Line: " <> t)
+                            _ -> Nothing
+                    _ -> Nothing
+            _ -> Nothing
+    showTextValue t
+        | t == " " = "<Space>"
+        | t == "\t" = "<Tab>"
+        | otherwise = "\"" <> t <> "\""
 
 {- | Compute a line-level delta between two viewport texts. Returns
 @Nothing@ when the frames are identical, or @Just encodedDelta@ with a

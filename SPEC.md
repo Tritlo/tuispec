@@ -247,9 +247,11 @@ PNG renderer implementation details:
 
 CLI command: `tuispec replay`
 - input: JSONL recording file
-- options: `--speed as-fast-as-possible|real-time`
+- options:
+  - `--speed as-fast-as-possible|real-time` (default `real-time`)
+  - `--show-input`: display last input action on a status line below the viewport
 - if recording contains `frame` events, replays them visually on the terminal
-  (clear screen + render each frame with original timing)
+  (overwrite in place with original timing)
 - falls back to printing raw request lines when no frames are present
 
 ### 8.1 Recording format

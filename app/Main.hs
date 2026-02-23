@@ -46,6 +46,7 @@ data ServerOptions = ServerOptions
 data ReplayOptions = ReplayOptions
     { replayInputPath :: FilePath
     , replaySpeed :: ReplaySpeed
+    , replayShowInput :: Bool
     }
 
 main :: IO ()
@@ -74,9 +75,17 @@ runCommand parsedCommand =
                     , Server.serverAmbiguityMode = ambiguity options
                     }
         Replay options -> do
-            frameCount <- streamReplayFrames (replaySpeed options) (replayInputPath options) displayFrame
+            -- Clear screen before starting frame replay
+            putStr "\ESC[2J\ESC[H"
+            hFlush stdout
+            let callback = if replayShowInput options then displayFrameWithInput else displayFrameOnly
+            frameCount <- streamReplayFrames (replaySpeed options) (replayInputPath options) callback
             if frameCount > 0
-                then putStrLn ("\nReplayed " <> show frameCount <> " frames")
+                then do
+                    -- Ensure cursor is visible and move below viewport
+                    putStr "\ESC[?25h"
+                    hFlush stdout
+                    putStrLn ("\nReplayed " <> show frameCount <> " frames")
                 else do
                     replayed <- streamReplayRequests (replaySpeed options) (replayInputPath options) TIO.putStrLn
                     putStrLn ("Replayed " <> show replayed <> " request messages")
@@ -251,8 +260,12 @@ parseReplayOptions =
             ( long "speed"
                 <> metavar "MODE"
                 <> help "Replay speed: as-fast-as-possible|real-time"
-                <> value ReplayAsFastAsPossible
+                <> value ReplayRealTime
                 <> showDefaultWith renderReplaySpeed
+            )
+        <*> switch
+            ( long "show-input"
+                <> help "Show last input action on a status line below the viewport"
             )
 
 positiveIntReader :: ReadM Int
@@ -306,8 +319,26 @@ defaultTextOutputPath input =
         then take (length input - length (".ansi.txt" :: String)) input <> ".txt"
         else input <> ".txt"
 
-displayFrame :: Text -> IO ()
-displayFrame frameText = do
-    putStr "\ESC[2J\ESC[H"
+-- | Display a frame ignoring input labels.
+displayFrameOnly :: Text -> Maybe Text -> IO ()
+displayFrameOnly frameText _maybeInput = do
+    putStr "\ESC[?25l\ESC[H"
     TIO.putStr frameText
+    putStr "\ESC[?25h"
+    hFlush stdout
+
+-- | Display a frame with an input status line below the viewport.
+displayFrameWithInput :: Text -> Maybe Text -> IO ()
+displayFrameWithInput frameText maybeInput = do
+    putStr "\ESC[?25l\ESC[H"
+    TIO.putStr frameText
+    -- Erase the status line, then print the input label if present
+    putStr "\ESC[K"
+    case maybeInput of
+        Just label -> do
+            putStr "\n\ESC[7m "
+            TIO.putStr label
+            putStr " \ESC[0m\ESC[K"
+        Nothing -> putStr "\n\ESC[K"
+    putStr "\ESC[?25h"
     hFlush stdout

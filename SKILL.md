@@ -216,11 +216,17 @@ Replay a recording visually on your terminal (frame-by-frame):
 cabal run tuispec -- replay artifacts/server/demo.jsonl --speed real-time
 ```
 
-If the recording contains viewport frames, the replay clears the screen and
-renders each frame in place with original timing. If no frames are present
-(older recordings), it falls back to printing the raw JSON-RPC request lines.
+If the recording contains viewport frames, the replay renders each frame in
+place with original timing. If no frames are present (older recordings), it
+falls back to printing the raw JSON-RPC request lines.
 
 Use `--speed as-fast-as-possible` to skip timing delays.
+
+To show the last input action below the viewport during replay:
+
+```bash
+cabal run tuispec -- replay artifacts/server/demo.jsonl --show-input
+```
 
 For push-based polling alternatives, subscribe to view changes:
 
