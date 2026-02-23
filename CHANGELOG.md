@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+* Fix `TUISPEC_ARTIFACTS_DIR` handling by creating custom artifact directories before canonicalization
+* Fix server `waitForText` option merging to preserve session-level timeout defaults when only partial overrides are provided
+* Refactor duplicated project-root discovery logic into shared `TuiSpec.ProjectRoot`
+
 ## 0.1.0.0 — 2026-02-23
 
 * Initial release

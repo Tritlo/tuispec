@@ -27,6 +27,7 @@ module TuiSpec.Runner (
     typeText,
     killSessionChildrenNow,
     waitForSelector,
+    defaultWaitOptionsFor,
     withTuiSession,
     waitFor,
     waitForText,
@@ -49,9 +50,9 @@ import Data.Text.Encoding qualified as TE
 import Data.Text.Encoding.Error qualified as TEE
 import Data.Text.IO qualified as TIO
 import Data.Time.Clock (NominalDiffTime, UTCTime, diffUTCTime, getCurrentTime)
-import System.Directory (canonicalizePath, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getCurrentDirectory, listDirectory, removePathForcibly)
+import System.Directory (canonicalizePath, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, removePathForcibly)
 import System.Environment (getEnvironment, lookupEnv)
-import System.FilePath (isRelative, makeRelative, takeDirectory, (</>))
+import System.FilePath (isRelative, makeRelative, (</>))
 import System.Posix.Process (getProcessGroupIDOf)
 import System.Posix.Pty qualified as Pty
 import System.Posix.Signals (sigKILL, signalProcess, signalProcessGroup)
@@ -61,6 +62,7 @@ import System.Timeout (timeout)
 import Test.Tasty (TestTree)
 import Test.Tasty.HUnit (assertFailure, testCase)
 import Text.Read (readMaybe)
+import TuiSpec.ProjectRoot (resolveProjectRoot)
 import TuiSpec.Types
 
 data TestStatus
@@ -1419,10 +1421,13 @@ safeTextIndex indexValue textValue
     | otherwise = Just (T.index textValue indexValue)
 
 resolveArtifactsBaseDir :: FilePath -> FilePath -> IO FilePath
-resolveArtifactsBaseDir projectRoot value =
-    if isRelative value
-        then canonicalizePath (projectRoot </> value)
-        else canonicalizePath value
+resolveArtifactsBaseDir projectRoot value = do
+    let basePath =
+            if isRelative value
+                then projectRoot </> value
+                else value
+    createDirectoryIfMissing True basePath
+    canonicalizePath basePath
 
 printTuiTestSummary ::
     FilePath ->
@@ -1458,38 +1463,6 @@ renderSnapshotEntries state =
         [] -> "  (none)\n"
         paths ->
             concatMap (\path -> "  - " <> path <> "\n") (sort paths)
-
-resolveProjectRoot :: IO FilePath
-resolveProjectRoot = do
-    projectRootOverride <- lookupEnv "TUISPEC_PROJECT_ROOT"
-    case projectRootOverride of
-        Just override -> canonicalizePath override
-        Nothing -> do
-            cwd <- getCurrentDirectory
-            locateProjectRoot cwd
-
-locateProjectRoot :: FilePath -> IO FilePath
-locateProjectRoot startDir = do
-    absoluteStart <- canonicalizePath startDir
-    go absoluteStart absoluteStart
-  where
-    go startRoot currentDir = do
-        markerPresent <- hasProjectMarker currentDir
-        if markerPresent
-            then pure currentDir
-            else do
-                let parentDir = takeDirectory currentDir
-                if parentDir == currentDir
-                    then pure startRoot
-                    else go startRoot parentDir
-
-hasProjectMarker :: FilePath -> IO Bool
-hasProjectMarker dir = do
-    hasGit <- doesDirectoryExist (dir </> ".git")
-    hasCabalProject <- doesFileExist (dir </> "cabal.project")
-    entries <- listDirectory dir `catch` \(_ :: SomeException) -> pure []
-    let hasCabalFile = any (".cabal" `isSuffixOf`) entries
-    pure (hasGit || hasCabalProject || hasCabalFile)
 
 resetDirectory :: FilePath -> IO ()
 resetDirectory dir = do

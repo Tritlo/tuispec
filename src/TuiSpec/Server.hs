@@ -26,8 +26,8 @@ import System.IO (hFlush, stdin, stdout)
 import System.IO.Error (isEOFError, tryIOError)
 import System.Posix.Process (exitImmediately)
 import System.Posix.Signals (Handler (Catch), installHandler, sigHUP)
-import TuiSpec.Runner (currentView, dumpView, expectNotVisible, expectSnapshot, expectVisible, killSessionChildrenNow, launch, openSession, press, pressCombo, sendLine, typeText, waitForSelector, waitForText)
-import TuiSpec.Types (AmbiguityMode (FailOnAmbiguous, FirstVisibleMatch), App (App), Key (..), Modifier (AltModifier, Control, Shift), Rect (Rect), RunOptions (..), Selector (..), SnapshotName (SnapshotName), Tui (..), WaitOptions (..), defaultRunOptions, defaultWaitOptions)
+import TuiSpec.Runner (currentView, defaultWaitOptionsFor, dumpView, expectNotVisible, expectSnapshot, expectVisible, killSessionChildrenNow, launch, openSession, press, pressCombo, sendLine, typeText, waitForSelector)
+import TuiSpec.Types (AmbiguityMode (FailOnAmbiguous, FirstVisibleMatch), App (App), Key (..), Modifier (AltModifier, Control, Shift), Rect (Rect), RunOptions (..), Selector (..), SnapshotName (SnapshotName), Tui (..), WaitOptions (..), defaultRunOptions)
 
 data ServerOptions = ServerOptions
     { serverArtifactsDir :: FilePath
@@ -282,17 +282,13 @@ dispatchWaitForText state request =
             Right params ->
                 runMethod $ do
                     let tui = activeTui active
-                    case (waitTimeoutMs params, waitPollIntervalMs params) of
-                        (Nothing, Nothing) ->
-                            waitForText tui (waitSelector params)
-                        _ ->
-                            waitForSelector
-                                tui
-                                defaultWaitOptions
-                                    { timeoutMs = maybe (timeoutMs defaultWaitOptions) id (waitTimeoutMs params)
-                                    , pollIntervalMs = maybe (pollIntervalMs defaultWaitOptions) id (waitPollIntervalMs params)
-                                    }
-                                (waitSelector params)
+                    let defaults = defaultWaitOptionsFor tui
+                    let mergedWaitOptions =
+                            defaults
+                                { timeoutMs = maybe (timeoutMs defaults) id (waitTimeoutMs params)
+                                , pollIntervalMs = maybe (pollIntervalMs defaults) id (waitPollIntervalMs params)
+                                }
+                    waitForSelector tui mergedWaitOptions (waitSelector params)
                     pure (object ["ok" .= True])
 
 dispatchExpectVisible :: ServerState -> RPC.JSONRPCRequest -> IO (Either RpcFailure DispatchOutcome)
