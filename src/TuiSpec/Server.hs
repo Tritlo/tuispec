@@ -12,7 +12,7 @@ module TuiSpec.Server (
     runServer,
 ) where
 
-import Control.Exception (SomeException, displayException, try)
+import Control.Exception (SomeException, displayException, finally, try)
 import Control.Monad (when)
 import Data.Aeson (FromJSON (parseJSON), Result (Error, Success), Value (Null, Object), eitherDecodeStrict', encode, fromJSON, object, withObject, (.:), (.:?), (.=))
 import Data.Aeson.KeyMap qualified as KM
@@ -76,7 +76,7 @@ runServer options = do
     sessionRef <- newIORef Nothing
     let state = ServerState{stateOptions = options, stateActiveSession = sessionRef}
     _ <- installHandler sigHUP (Catch (handleSighup state)) Nothing
-    loop state
+    loop state `finally` killActiveChildrenNow state
   where
     handleSighup state = do
         killActiveChildrenNow state
@@ -100,23 +100,19 @@ handleLine state line =
     case eitherDecodeStrict' line :: Either String RPC.JSONRPCRequest of
         Left parseErr -> do
             writeErrorResponse (RPC.RequestId Null) (parseError parseErr)
-            pure True
         Right request ->
             case validateRequestVersion request of
                 Left err -> do
                     writeErrorResponse (requestId request) err
-                    pure True
                 Right () -> do
                     outcome <- dispatchRequest state request
                     case outcome of
-                        Left err -> do
+                        Left err ->
                             writeErrorResponse (requestId request) err
-                            pure True
-                        Right (Continue resultValue) -> do
+                        Right (Continue resultValue) ->
                             writeSuccessResponse (requestId request) resultValue
-                            pure True
                         Right (Shutdown resultValue) -> do
-                            writeSuccessResponse (requestId request) resultValue
+                            _ <- writeSuccessResponse (requestId request) resultValue
                             pure False
 
 validateRequestVersion :: RPC.JSONRPCRequest -> Either RpcFailure ()
@@ -379,14 +375,14 @@ runMethod action = do
             Left err -> Left (methodFailed (displayException err))
             Right value -> Right (Continue value)
 
-writeSuccessResponse :: RPC.RequestId -> Value -> IO ()
+writeSuccessResponse :: RPC.RequestId -> Value -> IO Bool
 writeSuccessResponse reqId resultValue =
     writeJsonLine
         ( encode
             (RPC.JSONRPCResponse RPC.rPC_VERSION reqId resultValue)
         )
 
-writeErrorResponse :: RPC.RequestId -> RpcFailure -> IO ()
+writeErrorResponse :: RPC.RequestId -> RpcFailure -> IO Bool
 writeErrorResponse reqId failure =
     writeJsonLine
         ( encode
@@ -397,11 +393,17 @@ writeErrorResponse reqId failure =
             )
         )
 
-writeJsonLine :: BL8.ByteString -> IO ()
+writeJsonLine :: BL8.ByteString -> IO Bool
 writeJsonLine bytes = do
-    BL8.hPutStr stdout bytes
-    BL8.hPutStr stdout "\n"
-    hFlush stdout
+    writeResult <-
+        tryIOError $ do
+            BL8.hPutStr stdout bytes
+            BL8.hPutStr stdout "\n"
+            hFlush stdout
+    pure $
+        case writeResult of
+            Left _ -> False
+            Right () -> True
 
 decodeParams :: (FromJSON a) => RPC.JSONRPCRequest -> Either RpcFailure a
 decodeParams request =
@@ -652,17 +654,19 @@ parseAmbiguityMode raw =
 
 parseSendKey :: Text -> Either String ([Modifier], Key)
 parseSendKey rawKey =
-    case map T.strip (T.splitOn "+" (T.strip rawKey)) of
-        [baseKey] ->
-            (,) [] <$> parseBaseKey baseKey
-        [modifierText, keyText] ->
-            do
-                modifier <- parseModifier modifierText
-                keyValue <- parseModifiedKey keyText
-                pure ([modifier], keyValue)
-        _ ->
-            Left "key must be a simple key or modifier combo like Ctrl+C"
+    if trimmed == "+"
+        then (,) [] <$> parseBaseKey trimmed
+        else case T.breakOn "+" trimmed of
+            (_, "") ->
+                (,) [] <$> parseBaseKey trimmed
+            (modifierText, remainder) ->
+                do
+                    modifier <- parseModifier (T.strip modifierText)
+                    keyValue <- parseModifiedKey (T.strip (T.drop 1 remainder))
+                    pure ([modifier], keyValue)
   where
+    trimmed = T.strip rawKey
+
     parseModifier textValue =
         case map toLower (T.unpack textValue) of
             "ctrl" -> Right Control

@@ -512,7 +512,14 @@ teardownTui tui =
 terminatePtyHandle :: PtyHandle -> IO ()
 terminatePtyHandle ptyHandle = do
     _ <- timeout (500 * 1000) (ignoreIOError (terminateProcess (ptyProcess ptyHandle)))
-    _ <- timeout (500 * 1000) (ignoreIOError (void (waitForProcess (ptyProcess ptyHandle))))
+    waitResult <- timeout (500 * 1000) (ignoreIOError (void (waitForProcess (ptyProcess ptyHandle))))
+    case waitResult of
+        Just () ->
+            pure ()
+        Nothing -> do
+            killPtyProcessGroupNow ptyHandle
+            _ <- timeout (500 * 1000) (ignoreIOError (void (waitForProcess (ptyProcess ptyHandle))))
+            pure ()
     _ <- timeout (500 * 1000) (ignoreIOError (Pty.closePty (ptyMaster ptyHandle)))
     pure ()
 
@@ -1007,9 +1014,7 @@ applyCsi stateValue payload finalChar =
                     , emuCursorCol = 0
                     }
             'J' ->
-                if modeValue == 2 || modeValue == 3 || modeValue == 0
-                    then clearScreen stateValue
-                    else stateValue
+                clearScreenByMode stateValue modeValue
             'K' ->
                 clearLine stateValue modeValue
             's' ->
@@ -1165,6 +1170,39 @@ restoreCursor stateValue =
 
 clearScreen :: EmuState -> EmuState
 clearScreen stateValue = stateValue{emuCells = IM.empty}
+
+clearScreenByMode :: EmuState -> Int -> EmuState
+clearScreenByMode stateValue modeValue =
+    case modeValue of
+        1 ->
+            deleteCellRange stateValue 0 endIndex
+        2 ->
+            clearScreen stateValue
+        3 ->
+            clearScreen stateValue
+        _ ->
+            deleteCellRange stateValue startIndex lastIndex
+  where
+    rowValue = emuCursorRow stateValue
+    colValue = emuCursorCol stateValue
+    cols = emuCols stateValue
+    rows = emuRows stateValue
+    startIndex = cellIndex stateValue rowValue colValue
+    endIndex = cellIndex stateValue rowValue colValue
+    lastIndex = rows * cols - 1
+
+deleteCellRange :: EmuState -> Int -> Int -> EmuState
+deleteCellRange stateValue startIndex endIndex =
+    if endIndex < startIndex
+        then stateValue
+        else
+            stateValue
+                { emuCells =
+                    foldl'
+                        (flip IM.delete)
+                        (emuCells stateValue)
+                        [startIndex .. endIndex]
+                }
 
 clearLine :: EmuState -> Int -> EmuState
 clearLine stateValue modeValue =
