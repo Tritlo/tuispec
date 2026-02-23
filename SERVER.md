@@ -81,6 +81,7 @@ Defaults:
   - params:
     - `command`
     - `args`
+    - optional `env` object (string-to-string map)
 
 - `sendKey`
   - params:
@@ -112,6 +113,11 @@ Defaults:
   - result:
     - `snapshotPath`
     - `metaPath`
+
+Launch env behavior:
+- `env` is optional
+- when present, values override inherited process environment variables for that launch
+- `TERM=xterm-256color` is still enforced by the runner
 
 ### Assertions / waits
 

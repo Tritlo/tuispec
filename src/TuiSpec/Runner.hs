@@ -160,19 +160,19 @@ tuiTest options name body =
 If an app is already running for the test, it is terminated first.
 -}
 launch :: Tui -> App -> IO ()
-launch tui app = do
-    appendAction tui ("launch " <> T.pack (command app))
+launch tui appSpec = do
+    appendAction tui ("launch " <> T.pack (command appSpec))
     currentPty <- readPty tui
     case currentPty of
         Just ptyHandle ->
             terminatePtyHandle ptyHandle
         Nothing -> pure ()
     writePty tui Nothing
-    maybePty <- initializePty (terminalRows (tuiOptions tui)) (terminalCols (tuiOptions tui)) app
+    maybePty <- initializePty (terminalRows (tuiOptions tui)) (terminalCols (tuiOptions tui)) appSpec
     case maybePty of
         Just ptyHandle -> do
             writePty tui (Just ptyHandle)
-            modifyState tui $ \state -> state{launchedApp = Just app}
+            modifyState tui $ \state -> state{launchedApp = Just appSpec}
             threadDelay settleDelayMicros
             _ <- syncVisibleBuffer tui
             pure ()
@@ -469,21 +469,21 @@ mkTui projectRoot options name testRoot snapshotRoot _attempt = do
     pure tui
 
 initializePty :: Int -> Int -> App -> IO (Maybe PtyHandle)
-initializePty rows cols app = do
-    result <- try (startPty rows cols app) :: IO (Either SomeException PtyHandle)
+initializePty rows cols appSpec = do
+    result <- try (startPty rows cols appSpec) :: IO (Either SomeException PtyHandle)
     case result of
         Left _ -> pure Nothing
         Right handle -> pure (Just handle)
 
 startPty :: Int -> Int -> App -> IO PtyHandle
-startPty rows cols app = do
-    processEnv <- withTerminalEnv
+startPty rows cols appSpec = do
+    processEnv <- withTerminalEnv (env appSpec)
     (master, processHandle) <-
         Pty.spawnWithPty
             (Just processEnv)
             True
-            (command app)
-            (args app)
+            (command appSpec)
+            (args appSpec)
             (cols, rows)
     pure
         PtyHandle
@@ -491,10 +491,18 @@ startPty rows cols app = do
             , ptyProcess = processHandle
             }
 
-withTerminalEnv :: IO [(String, String)]
-withTerminalEnv = do
+withTerminalEnv :: Maybe [(String, String)] -> IO [(String, String)]
+withTerminalEnv envOverrides = do
     existing <- getEnvironment
-    pure (overrideEnv "TERM" "xterm-256color" existing)
+    let merged =
+            case envOverrides of
+                Nothing -> existing
+                Just overrides ->
+                    foldl'
+                        (\acc (key, value) -> overrideEnv key value acc)
+                        existing
+                        overrides
+    pure (overrideEnv "TERM" "xterm-256color" merged)
   where
     overrideEnv key value pairs =
         (key, value) : filter ((/= key) . fst) pairs

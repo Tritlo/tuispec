@@ -11,7 +11,7 @@ main =
         testGroup
             "example-integration"
             [ tuiTest options "brick demo main flow" $ \tui -> do
-                launch tui (App "sh" ["-lc", demoLaunchCommand])
+                launch tui (app "sh" ["-lc", demoLaunchCommand])
                 waitForText tui (Exact "Agent Readiness")
                 waitForText tui (Exact "Press / to open command mode")
                 expectSnapshot tui "initial"
@@ -29,7 +29,7 @@ main =
                 expectSnapshot tui "logs"
                 press tui (CharKey 'q')
             , tuiTest options "brick demo resets between tests" $ \tui -> do
-                launch tui (App "sh" ["-lc", demoLaunchCommand])
+                launch tui (app "sh" ["-lc", demoLaunchCommand])
                 waitForText tui (Exact "Agent Readiness")
                 press tui (CharKey 'b')
                 waitForText tui (Exact "Board Tasks (j/k move, space toggle)")

@@ -39,7 +39,7 @@ Main public modules:
 
 Key data types:
 - `RunOptions`: runtime and artifact behavior
-- `App`: target command + args
+- `App`: target command + args + optional env overrides
 - `Key` / `Modifier`: input model
 - `Selector`: viewport query model
 - `WaitOptions`: polling behavior
@@ -73,7 +73,7 @@ main :: IO ()
 main =
   defaultMain $ testGroup "suite"
     [ tuiTest defaultRunOptions "counter" $ \tui -> do
-        launch tui (App "my-tui" [])
+        launch tui (app "my-tui" [])
         waitForText tui (Exact "Ready")
         press tui (CharKey '+')
         expectSnapshot tui "counter-updated"
@@ -86,7 +86,7 @@ Use `withTuiSession` for interactive scripts/tools:
 
 ```haskell
 withTuiSession defaultRunOptions "demo" $ \tui -> do
-  launch tui (App "sh" [])
+  launch tui (app "sh" [])
   sendLine tui "echo hello"
   _ <- dumpView tui "hello"
   pure ()
@@ -95,12 +95,15 @@ withTuiSession defaultRunOptions "demo" $ \tui -> do
 ### 4.3 Actions
 
 - `launch :: Tui -> App -> IO ()`
+- `app :: FilePath -> [String] -> App`
 - `press :: Tui -> Key -> IO ()`
 - `pressCombo :: Tui -> [Modifier] -> Key -> IO ()`
 - `typeText :: Tui -> Text -> IO ()`
 - `sendLine :: Tui -> Text -> IO ()`
 
 `launch` replaces any currently running app for that `Tui` handle.
+When `App.env` is provided, launch inherits parent environment variables and
+overrides matching keys with provided values.
 
 ### 4.4 Waits and assertions
 
@@ -274,13 +277,28 @@ Server error codes:
   - `-32002` session already started
   - `-32004` method failed
 
-### 9.1 `sendKey` format
+### 9.1 `launch` params
+
+`launch` accepts:
+- `command` (string)
+- `args` (array of strings, optional)
+- `env` (object of string-to-string pairs, optional)
+
+Example:
+
+```json
+{"method":"launch","params":{"command":"sh","args":[],"env":{"APP_MODE":"test"}}}
+```
+
+`env` values override inherited process env variables for that launch.
+
+### 9.2 `sendKey` format
 
 Accepted string forms:
 - base: `Enter`, `Esc`, `Tab`, `Backspace`, arrows, `F1..F12`, single char
 - combos: `Ctrl+X`, `Alt+X`, `Shift+X`
 
-### 9.2 Selector JSON format
+### 9.3 Selector JSON format
 
 ```json
 {"type":"exact","text":"Ready"}
@@ -290,7 +308,7 @@ Accepted string forms:
 {"type":"nth","index":1,"selector":{"type":"exact","text":"Task"}}
 ```
 
-### 9.3 Shutdown semantics
+### 9.4 Shutdown semantics
 
 `server.shutdown`:
 - sends `SIGKILL` to active child process group

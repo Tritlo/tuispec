@@ -47,7 +47,7 @@ main =
             }
         "demo-session"
         $ \tui -> do
-            launch tui (App "sh" ["-lc", "tui-demo"])
+            launch tui (app "sh" ["-lc", "tui-demo"])
 
             _ <- dumpView tui "00-initial"
 
@@ -141,7 +141,7 @@ Then send requests like:
 
 ```json
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"name":"demo"}}
-{"jsonrpc":"2.0","id":2,"method":"launch","params":{"command":"sh","args":["-lc","tui-demo"]}}
+{"jsonrpc":"2.0","id":2,"method":"launch","params":{"command":"sh","args":["-lc","tui-demo"],"env":{"DEMO_MODE":"1"}}}
 {"jsonrpc":"2.0","id":3,"method":"sendKey","params":{"key":"ArrowDown"}}
 {"jsonrpc":"2.0","id":4,"method":"sendKey","params":{"key":"Enter"}}
 {"jsonrpc":"2.0","id":5,"method":"dumpView","params":{"name":"after-enter"}}

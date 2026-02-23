@@ -15,6 +15,7 @@ module TuiSpec.Server (
 import Control.Exception (SomeException, displayException, finally, try)
 import Control.Monad (when)
 import Data.Aeson (FromJSON (parseJSON), Result (Error, Success), Value (Null, Object), eitherDecodeStrict', encode, fromJSON, object, withObject, (.:), (.:?), (.=))
+import Data.Aeson.Key qualified as K
 import Data.Aeson.KeyMap qualified as KM
 import Data.Aeson.Types qualified as AesonTypes
 import Data.ByteString qualified as BS
@@ -34,7 +35,7 @@ import System.IO.Error (isEOFError, tryIOError)
 import System.Posix.Process (exitImmediately)
 import System.Posix.Signals (Handler (Catch), installHandler, sigHUP)
 import TuiSpec.Runner (currentView, defaultWaitOptionsFor, dumpView, expectNotVisible, expectSnapshot, expectVisible, killSessionChildrenNow, launch, openSession, press, pressCombo, sendLine, typeText, waitForSelector)
-import TuiSpec.Types (AmbiguityMode (FailOnAmbiguous, FirstVisibleMatch), App (App), Key (..), Modifier (Alt, Control, Shift), Rect (Rect), RunOptions (..), Selector (..), SnapshotName (SnapshotName), Tui (..), WaitOptions (..), defaultRunOptions)
+import TuiSpec.Types (AmbiguityMode (FailOnAmbiguous, FirstVisibleMatch), App (..), Key (..), Modifier (Alt, Control, Shift), Rect (Rect), RunOptions (..), Selector (..), SnapshotName (SnapshotName), Tui (..), WaitOptions (..), defaultRunOptions)
 
 -- | Configuration for the JSON-RPC server.
 data ServerOptions = ServerOptions
@@ -190,7 +191,13 @@ dispatchLaunch state request =
             Left err -> pure (Left err)
             Right params ->
                 runMethod $
-                    launch (activeTui active) (App (launchCommand params) (launchArgs params))
+                    launch
+                        (activeTui active)
+                        App
+                            { command = launchCommand params
+                            , args = launchArgs params
+                            , env = launchEnv params
+                            }
                         >> pure (object ["ok" .= True])
 
 dispatchSendKey :: ServerState -> RPC.JSONRPCRequest -> IO (Either RpcFailure DispatchOutcome)
@@ -331,7 +338,7 @@ dispatchPing request =
                     ( Continue
                         ( object
                             [ "pong" .= True
-                            , "version" .= ("0.1.0.0" :: String)
+                            , "version" .= ("0.1.1.0" :: String)
                             ]
                         )
                     )
@@ -509,6 +516,7 @@ defaultStartParams =
 data LaunchParams = LaunchParams
     { launchCommand :: FilePath
     , launchArgs :: [String]
+    , launchEnv :: Maybe [(String, String)]
     }
 
 instance FromJSON LaunchParams where
@@ -517,6 +525,17 @@ instance FromJSON LaunchParams where
             LaunchParams
                 <$> o .: "command"
                 <*> o .:? "args" AesonTypes..!= []
+                <*> (o .:? "env" >>= traverse parseLaunchEnvObject)
+
+parseLaunchEnvObject :: Value -> AesonTypes.Parser [(String, String)]
+parseLaunchEnvObject =
+    withObject "launch.env" $ \envObject ->
+        mapM parseLaunchEnvPair (KM.toList envObject)
+
+parseLaunchEnvPair :: (K.Key, Value) -> AesonTypes.Parser (String, String)
+parseLaunchEnvPair (key, value) = do
+    textValue <- (AesonTypes.parseJSON value :: AesonTypes.Parser Text)
+    pure (K.toString key, T.unpack textValue)
 
 data SendKeyParams = SendKeyParams
     { sendKeyValue :: Text

@@ -12,7 +12,7 @@ main :: IO ()
 main =
   defaultMain $ testGroup "demo"
     [ tuiTest defaultRunOptions "my test" $ \\tui -> do
-        launch tui (App "my-app" [])
+        launch tui (app "my-app" [])
         waitForText tui (Exact "Ready")
         press tui (CharKey 'q')
     ]
@@ -56,6 +56,7 @@ module TuiSpec (
     RunOptions (..),
     defaultRunOptions,
     App (..),
+    app,
     Key (..),
     Modifier (..),
     Selector (..),

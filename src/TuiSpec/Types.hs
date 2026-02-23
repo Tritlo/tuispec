@@ -9,6 +9,7 @@ These types are the public DSL surface used by test programs.
 module TuiSpec.Types (
     AmbiguityMode (..),
     App (..),
+    app,
     Key (..),
     Modifier (..),
     PtyHandle (..),
@@ -44,8 +45,18 @@ data Spec = Spec
 data App = App
     { command :: FilePath
     , args :: [String]
+    , env :: Maybe [(String, String)]
     }
     deriving (Eq, Show)
+
+-- | Construct an app launch request using inherited environment variables.
+app :: FilePath -> [String] -> App
+app commandValue argsValue =
+    App
+        { command = commandValue
+        , args = argsValue
+        , env = Nothing
+        }
 
 -- | How selector ambiguity is handled for assertion helpers.
 data AmbiguityMode

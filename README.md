@@ -42,7 +42,7 @@ main :: IO ()
 main =
   defaultMain $ testGroup "demo"
     [ tuiTest defaultRunOptions "counter" $ \tui -> do
-        launch tui (App "my-tui" [])
+        launch tui (app "my-tui" [])
         waitForText tui (Exact "Ready")
         press tui (CharKey '+')
         expectSnapshot tui "counter-updated"
@@ -81,6 +81,7 @@ cabal test
 
 ```haskell
 launch    :: Tui -> App -> IO ()
+app       :: FilePath -> [String] -> App
 press     :: Tui -> Key -> IO ()
 pressCombo :: Tui -> [Modifier] -> Key -> IO ()
 typeText  :: Tui -> Text -> IO ()
@@ -162,13 +163,16 @@ End-to-end session example:
 ```bash
 cat <<'JSON' | cabal run tuispec -- server --artifact-dir artifacts/server
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"name":"rpc-demo","terminalCols":134,"terminalRows":40}}
-{"jsonrpc":"2.0","id":2,"method":"launch","params":{"command":"sh","args":[]}}
+{"jsonrpc":"2.0","id":2,"method":"launch","params":{"command":"sh","args":[],"env":{"DEMO_FLAG":"1"}}}
 {"jsonrpc":"2.0","id":3,"method":"sendLine","params":{"text":"printf 'hello from rpc\\n'"}}
 {"jsonrpc":"2.0","id":4,"method":"waitForText","params":{"selector":{"type":"exact","text":"hello from rpc"}}}
 {"jsonrpc":"2.0","id":5,"method":"dumpView","params":{"name":"after-hello"}}
 {"jsonrpc":"2.0","id":6,"method":"server.shutdown","params":{}}
 JSON
 ```
+
+`launch.params.env` is optional. When provided, those variables override the
+inherited process environment for that launch.
 
 Input examples:
 
@@ -184,7 +188,7 @@ For ad-hoc exploration outside `tasty`:
 
 ```haskell
 withTuiSession defaultRunOptions "demo" $ \tui -> do
-  launch tui (App "sh" [])
+  launch tui (app "sh" [])
   sendLine tui "echo hello"
   _ <- dumpView tui "step-1"
   pure ()
