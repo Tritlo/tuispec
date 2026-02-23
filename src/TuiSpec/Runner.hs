@@ -1605,6 +1605,7 @@ writeSnapshotMetadata metaPath rows cols =
             ( object
                 [ "rows" .= rows
                 , "cols" .= cols
+                , "version" .= tuispecVersion
                 ]
             )
         )

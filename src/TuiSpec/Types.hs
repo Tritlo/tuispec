@@ -26,6 +26,7 @@ module TuiSpec.Types (
     defaultRunOptions,
     defaultStepOptions,
     defaultWaitOptions,
+    tuispecVersion,
 ) where
 
 import Data.IORef (IORef)
@@ -116,6 +117,10 @@ defaultRunOptions =
         , updateSnapshots = False
         , snapshotTheme = "auto"
         }
+
+-- | The tuispec library/protocol version.
+tuispecVersion :: String
+tuispecVersion = "0.2.0.0"
 
 -- | Key modifiers for combo key presses.
 data Modifier

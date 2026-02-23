@@ -46,7 +46,7 @@ import System.Posix.Signals (Handler (Catch), installHandler, sigHUP)
 import TuiSpec.Render (renderAnsiSnapshotFileWithFont)
 import TuiSpec.Replay (RecordingDirection (DirectionNotification, DirectionRequest, DirectionResponse), RecordingHandle, ReplaySpeed (ReplayAsFastAsPossible, ReplayRealTime), appendRecordingEvent, closeRecording, openRecording, readRecordingEvents, replayRecordedRequests)
 import TuiSpec.Runner (currentView, defaultWaitOptionsFor, dumpView, expectNotVisible, expectSnapshot, expectVisible, killSessionChildrenNow, launch, openSession, press, pressCombo, renderAnsiViewportText, sendLine, serializeAnsiSnapshot, typeText, waitForSelectorWithAmbiguity)
-import TuiSpec.Types (AmbiguityMode (FailOnAmbiguous, FirstVisibleMatch, LastVisibleMatch), App (..), Key (..), Modifier (Alt, Control, Shift), Rect (Rect), RunOptions (..), Selector (..), SnapshotName (SnapshotName), Tui (..), WaitOptions (..), defaultRunOptions)
+import TuiSpec.Types (AmbiguityMode (FailOnAmbiguous, FirstVisibleMatch, LastVisibleMatch), App (..), Key (..), Modifier (Alt, Control, Shift), Rect (Rect), RunOptions (..), Selector (..), SnapshotName (SnapshotName), Tui (..), WaitOptions (..), defaultRunOptions, tuispecVersion)
 
 -- | Configuration for the JSON-RPC server.
 data ServerOptions = ServerOptions
@@ -231,6 +231,7 @@ dispatchInitialize state paramsValue = do
                                                             , "artifactRoot" .= tuiTestRoot tui
                                                             , "rows" .= terminalRows (tuiOptions tui)
                                                             , "cols" .= terminalCols (tuiOptions tui)
+                                                            , "version" .= tuispecVersion
                                                             ]
                                                         )
 
@@ -617,7 +618,7 @@ dispatchPing paramsValue =
                     ( Continue
                         ( object
                             [ "pong" .= True
-                            , "version" .= ("0.2.0.0" :: String)
+                            , "version" .= tuispecVersion
                             ]
                         )
                     )

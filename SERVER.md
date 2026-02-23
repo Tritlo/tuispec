@@ -61,6 +61,7 @@ Defaults:
     - `artifactRoot`
     - `rows`
     - `cols`
+    - `version`
 
 - `launch`
   - params:
