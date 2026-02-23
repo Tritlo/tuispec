@@ -15,9 +15,7 @@ target app.
 Snapshots captured from the included [Brick demo app](example/app/Main.hs)
 using `tuispec`:
 
-| Dashboard | Board |
-|---|---|
-| ![Dashboard](doc/example-dashboard.png) | ![Board](doc/example-board.png) |
+![Board snapshot](doc/example-board.png)
 
 ## Features
 
