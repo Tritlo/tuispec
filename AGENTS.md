@@ -6,6 +6,7 @@
 - Scope: Playwright-like black-box testing for TUIs using PTY transport
 - Platform target: Linux terminal environments
 - Snapshot mode: text + PNG artifacts
+- Primary specification: `SPEC.md`
 
 ## Defaults To Keep
 - Terminal viewport default: `134` columns x `40` rows

@@ -10,7 +10,7 @@ synopsis:           Starter framework for testing terminal UIs with PTY transpor
 category:           Testing
 extra-source-files:
     README.md
-    tuispec-v1-spec.md
+    SPEC.md
 
 common common-settings
     default-language: GHC2021
