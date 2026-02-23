@@ -11,11 +11,13 @@ module TuiSpec.Replay (
     RecordingHandle,
     RecordingEvent (..),
     RecordingDirection (..),
+    ReplayFrame (..),
     ReplaySpeed (..),
     appendRecordingEvent,
     closeRecording,
     computeFrameDelta,
     extractInputLabel,
+    loadReplayFrames,
     openRecording,
     streamReplayFrames,
     streamReplayRequests,
@@ -348,6 +350,72 @@ aesonArrayToList = foldr (:) []
 
 toJsonLine :: RecordingEvent -> String
 toJsonLine = T.unpack . TE.decodeUtf8 . BL.toStrict . encode
+
+-- | A single reconstructed replay frame with full viewport text.
+data ReplayFrame = ReplayFrame
+    { replayFrameText :: Text
+    , replayFrameInput :: Maybe Text
+    , replayFrameTimestampMicros :: Int64
+    }
+    deriving (Eq, Show)
+
+{- | Load all replay frames from a JSONL recording file into a list.
+Delta frames are reconstructed into full viewport text so every element
+contains the complete frame content ready for display.
+-}
+loadReplayFrames :: FilePath -> IO [ReplayFrame]
+loadReplayFrames path =
+    bracket (openFile path ReadMode) hClose $ \fileHandle -> do
+        currentLinesRef <- newIORef ([] :: [Text])
+        lastInputRef <- newIORef (Nothing :: Maybe Text)
+        go fileHandle currentLinesRef lastInputRef (1 :: Int) []
+  where
+    go fileHandle currentLinesRef lastInputRef lineNumber !acc = do
+        eof <- hIsEOF fileHandle
+        if eof
+            then pure (reverse acc)
+            else do
+                lineValue <- BS8.hGetLine fileHandle
+                let trimmed = TE.decodeUtf8 lineValue
+                if T.null (T.strip trimmed)
+                    then go fileHandle currentLinesRef lastInputRef (lineNumber + 1) acc
+                    else case eitherDecodeStrict' lineValue of
+                        Left err ->
+                            throwIO
+                                (RecordingParseError path ("line " <> show lineNumber <> ": " <> err))
+                        Right event
+                            | recordingDirection event == DirectionRequest -> do
+                                let label = extractInputLabel (recordingLine event)
+                                case label of
+                                    Just _ -> writeIORef lastInputRef label
+                                    Nothing -> pure ()
+                                go fileHandle currentLinesRef lastInputRef (lineNumber + 1) acc
+                            | recordingDirection event == DirectionFrame -> do
+                                let frameLines = T.splitOn "\n" (recordingLine event)
+                                writeIORef currentLinesRef frameLines
+                                lastInput <- readIORef lastInputRef
+                                let frame =
+                                        ReplayFrame
+                                            { replayFrameText = recordingLine event
+                                            , replayFrameInput = lastInput
+                                            , replayFrameTimestampMicros = recordingTimestampMicros event
+                                            }
+                                go fileHandle currentLinesRef lastInputRef (lineNumber + 1) (frame : acc)
+                            | recordingDirection event == DirectionFrameDelta -> do
+                                baseLines <- readIORef currentLinesRef
+                                let updatedLines = applyDelta baseLines (recordingLine event)
+                                writeIORef currentLinesRef updatedLines
+                                lastInput <- readIORef lastInputRef
+                                let fullText = T.intercalate "\n" updatedLines
+                                let frame =
+                                        ReplayFrame
+                                            { replayFrameText = fullText
+                                            , replayFrameInput = lastInput
+                                            , replayFrameTimestampMicros = recordingTimestampMicros event
+                                            }
+                                go fileHandle currentLinesRef lastInputRef (lineNumber + 1) (frame : acc)
+                            | otherwise ->
+                                go fileHandle currentLinesRef lastInputRef (lineNumber + 1) acc
 
 nowMicros :: IO Int64
 nowMicros = do

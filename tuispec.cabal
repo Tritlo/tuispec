@@ -92,6 +92,7 @@ executable tuispec
     optparse-applicative >=0.18 && <0.20,
     text >=1.2 && <2.2,
     tuispec,
+    unix >=2.8 && <2.9,
 
 test-suite tuispec-smoke
   import: common-settings
