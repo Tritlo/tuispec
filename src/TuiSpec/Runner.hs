@@ -1,6 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
+{- |
+Module      : TuiSpec.Runner
+Description : PTY-backed runner and assertion helpers for TUI tests.
+
+Most users interact with this module through 'tuiTest' and the action/assertion
+functions ('launch', 'press', 'waitForText', 'expectSnapshot', ...).
+-}
 module TuiSpec.Runner (
     expectNotVisible,
     expectSnapshot,
@@ -67,6 +74,10 @@ instance Exception StepFailure
 settleDelayMicros :: Int
 settleDelayMicros = 80 * 1000
 
+{- | Build a @tasty@ 'TestTree' from a TUI spec body.
+
+Each test runs in isolation, with a fresh PTY process and per-test artifacts.
+-}
 tuiTest :: RunOptions -> String -> (Tui -> IO ()) -> TestTree
 tuiTest options name body =
     testCase name $ do
@@ -94,6 +105,10 @@ tuiTest options name body =
                                     <> snapshotEntries
                 assertFailure (T.unpack err <> artifactDetails)
 
+{- | Launch an application in a fresh PTY for the current test.
+
+If an app is already running for the test, it is terminated first.
+-}
 launch :: Tui -> App -> IO ()
 launch tui app = do
     appendAction tui ("launch " <> T.pack (command app))
@@ -114,6 +129,7 @@ launch tui app = do
         Nothing ->
             throwIO (AssertionError "PTY backend unavailable during launch")
 
+-- | Send a single key press to the PTY application.
 press :: Tui -> Key -> IO ()
 press tui key = do
     appendAction tui ("press " <> renderKey key)
@@ -129,6 +145,10 @@ press tui key = do
         Nothing ->
             throwIO (AssertionError "PTY backend unavailable during key press")
 
+{- | Send a modified key press (for example @Ctrl+C@) to the PTY application.
+
+Unsupported combos fall back to a plain 'press'.
+-}
 pressCombo :: Tui -> [Modifier] -> Key -> IO ()
 pressCombo tui modifiers key = do
     appendAction tui $
@@ -149,6 +169,7 @@ pressCombo tui modifiers key = do
         Nothing ->
             throwIO (AssertionError "PTY backend unavailable during combo key press")
 
+-- | Send literal text to the PTY application.
 typeText :: Tui -> Text -> IO ()
 typeText tui textValue = do
     appendAction tui ("typeText " <> textValue)
@@ -162,16 +183,19 @@ typeText tui textValue = do
         Nothing ->
             throwIO (AssertionError "PTY backend unavailable during typeText")
 
+-- | Assert that a selector eventually becomes visible.
 expectVisible :: Tui -> Selector -> IO ()
 expectVisible tui selector = do
     waitFor tui (defaultWaitOptionsFor tui) (selectorMatches selector)
     viewport <- currentViewport tui
     assertNotAmbiguous tui selector viewport
 
+-- | Assert that a selector eventually becomes absent.
 expectNotVisible :: Tui -> Selector -> IO ()
 expectNotVisible tui selector =
     waitFor tui (defaultWaitOptionsFor tui) (not . selectorMatches selector)
 
+-- | Wait for selector text and apply ambiguity checks.
 waitForText :: Tui -> Selector -> IO ()
 waitForText tui selector = do
     waitFor tui (defaultWaitOptionsFor tui) (selectorMatches selector)
@@ -184,6 +208,7 @@ defaultWaitOptionsFor tui =
         { timeoutMs = timeoutSeconds (tuiOptions tui) * 1000
         }
 
+-- | Poll until a viewport predicate succeeds or timeout is reached.
 waitFor :: Tui -> WaitOptions -> (Viewport -> Bool) -> IO ()
 waitFor tui waitOptions predicate = do
     start <- getCurrentTime
@@ -204,6 +229,14 @@ waitFor tui waitOptions predicate = do
                         threadDelay (pollIntervalMs waitOptions * 1000)
                         loop startedAt
 
+{- | Capture and compare the current PTY screen against a named snapshot.
+
+Writes:
+
+- per-run capture: @artifacts/tests/<test>/snapshots/<name>.ansi.txt@
+- baseline: @artifacts/snapshots/<test>/<name>.ansi.txt@
+- metadata for both paths: @<name>.meta.json@ (rows/cols)
+-}
 expectSnapshot :: Tui -> SnapshotName -> IO ()
 expectSnapshot tui snapshotName = do
     when (T.null (unSnapshotName snapshotName)) $
@@ -264,6 +297,11 @@ expectSnapshot tui snapshotName = do
                                 <> actualAnsiPath
                             )
 
+{- | Canonicalize ANSI text into a theme-aware JSON framebuffer.
+
+This representation is used for deterministic snapshot comparison and PNG
+rendering.
+-}
 serializeAnsiSnapshot :: Int -> Int -> String -> Text -> String
 serializeAnsiSnapshot rows cols requestedTheme ansiText =
     let resolvedTheme = resolveSnapshotTheme requestedTheme
@@ -273,6 +311,7 @@ serializeAnsiSnapshot rows cols requestedTheme ansiText =
                 (T.unpack ansiText)
      in serializeSnapshot resolvedTheme emuState
 
+-- | Retry a logical test step according to @StepOptions@.
 step :: StepOptions -> String -> IO a -> IO a
 step options label action = go 0
   where
@@ -737,6 +776,10 @@ themePalette PtyDefaultLight =
             ]
         }
 
+{- | Convert ANSI terminal output into the visible viewport text.
+
+This is primarily used by 'tuispec render-text' and snapshot assertions.
+-}
 renderAnsiViewportText :: Int -> Int -> Text -> Text
 renderAnsiViewportText rows cols rawText =
     renderEmuState (emulateAnsi (emptyEmuState rows cols) (T.unpack rawText))

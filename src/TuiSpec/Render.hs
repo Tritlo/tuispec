@@ -1,6 +1,14 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
+{- |
+Module      : TuiSpec.Render
+Description : Render snapshot ANSI artifacts as PNG or plain text.
+
+Both render paths auto-detect viewport size from adjacent @.meta.json@
+files produced by 'TuiSpec.Runner.expectSnapshot'. Explicit CLI overrides
+can still be supplied when needed.
+-}
 module TuiSpec.Render (
     renderAnsiSnapshotFile,
     renderAnsiSnapshotTextFile,
@@ -25,6 +33,16 @@ import Text.Read (readMaybe)
 import TuiSpec.Runner (renderAnsiViewportText, serializeAnsiSnapshot)
 import TuiSpec.Types (defaultRunOptions, terminalCols, terminalRows)
 
+{- | Render an ANSI snapshot file to PNG.
+
+Size resolution order for rows/cols:
+
+1. explicit overrides
+2. adjacent @.meta.json@
+3. 'defaultRunOptions'
+
+Theme is rendering-only and defaults to @auto@ when omitted.
+-}
 renderAnsiSnapshotFile :: Maybe Int -> Maybe Int -> Maybe String -> FilePath -> FilePath -> IO ()
 renderAnsiSnapshotFile rowOverride colOverride themeOverride ansiPath outPath = do
     ansiText <- TIO.readFile ansiPath
@@ -44,6 +62,12 @@ renderAnsiSnapshotFile rowOverride colOverride themeOverride ansiPath outPath = 
             throwIO
                 (userError ("Failed to render styled PNG (python3 + Pillow required in PATH). " <> stderrText))
 
+{- | Render an ANSI snapshot file to visible plain text.
+
+This replays ANSI into the same emulator used by snapshot comparison and
+therefore preserves terminal layout semantics better than naive escape
+stripping.
+-}
 renderAnsiSnapshotTextFile :: Maybe Int -> Maybe Int -> FilePath -> FilePath -> IO ()
 renderAnsiSnapshotTextFile rowOverride colOverride ansiPath outPath = do
     ansiText <- TIO.readFile ansiPath
@@ -108,6 +132,10 @@ snapshotMetadataPath ansiPath =
         then take (length ansiPath - length (".ansi.txt" :: String)) ansiPath <> ".meta.json"
         else ansiPath <> ".meta.json"
 
+{- | Best-effort ANSI escape stripping helper.
+
+Prefer 'renderAnsiSnapshotTextFile' for faithful terminal output.
+-}
 stripAnsiText :: T.Text -> T.Text
 stripAnsiText =
     T.replace "\r\n" "\n"

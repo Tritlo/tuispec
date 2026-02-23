@@ -1,5 +1,11 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
+{- |
+Module      : TuiSpec.Types
+Description : Core types for TUI test specs, selectors, and runtime options.
+
+These types are the public DSL surface used by test programs.
+-}
 module TuiSpec.Types (
     AmbiguityMode (..),
     App (..),
@@ -28,22 +34,26 @@ import Data.Text qualified as T
 import System.Posix.Pty (Pty)
 import System.Process (ProcessHandle)
 
+-- | A single test specification: name + executable body.
 data Spec = Spec
     { specName :: String
     , specBody :: Tui -> IO ()
     }
 
+-- | The command to launch inside the PTY.
 data App = App
     { command :: FilePath
     , args :: [String]
     }
     deriving (Eq, Show)
 
+-- | How selector ambiguity is handled for assertion helpers.
 data AmbiguityMode
     = FailOnAmbiguous
     | FirstVisibleMatch
     deriving (Eq, Show, Read)
 
+-- | Runtime options for a @tuiTest@ execution.
 data RunOptions = RunOptions
     { timeoutSeconds :: Int
     , retries :: Int
@@ -57,6 +67,15 @@ data RunOptions = RunOptions
     }
     deriving (Eq, Show)
 
+{- | Sensible defaults for local and CI runs.
+
+Defaults:
+
+- timeout: 5s
+- retries: 0
+- viewport: 134x40
+- artifacts dir: @artifacts@
+-}
 defaultRunOptions :: RunOptions
 defaultRunOptions =
     RunOptions
@@ -71,12 +90,14 @@ defaultRunOptions =
         , snapshotTheme = "auto"
         }
 
+-- | Key modifiers for combo key presses.
 data Modifier
     = Control
     | AltModifier
     | Shift
     deriving (Eq, Show, Read)
 
+-- | Input key model used by @press@ and @pressCombo@.
 data Key
     = Enter
     | Esc
@@ -93,6 +114,7 @@ data Key
     | NamedKey Text
     deriving (Eq, Show, Read)
 
+-- | A rectangular region within the terminal viewport.
 data Rect = Rect
     { rectCol :: Int
     , rectRow :: Int
@@ -101,6 +123,7 @@ data Rect = Rect
     }
     deriving (Eq, Show, Read)
 
+-- | Selector language used by visibility and text assertions.
 data Selector
     = Exact Text
     | Regex Text
@@ -109,12 +132,14 @@ data Selector
     | Nth Int Selector
     deriving (Eq, Show, Read)
 
+-- | Polling behavior for @waitFor@.
 data WaitOptions = WaitOptions
     { timeoutMs :: Int
     , pollIntervalMs :: Int
     }
     deriving (Eq, Show, Read)
 
+-- | Default wait behavior: 30s timeout with 100ms polling.
 defaultWaitOptions :: WaitOptions
 defaultWaitOptions =
     WaitOptions
@@ -122,6 +147,7 @@ defaultWaitOptions =
         , pollIntervalMs = 100
         }
 
+-- | Strongly-typed snapshot identifier.
 newtype SnapshotName = SnapshotName
     { unSnapshotName :: Text
     }
@@ -130,12 +156,14 @@ newtype SnapshotName = SnapshotName
 instance IsString SnapshotName where
     fromString = SnapshotName . T.pack
 
+-- | Retry behavior for a single logical test step.
 data StepOptions = StepOptions
     { stepMaxRetries :: Int
     , stepRetryDelayMs :: Int
     }
     deriving (Eq, Show, Read)
 
+-- | Default step retries: no retries, no delay.
 defaultStepOptions :: StepOptions
 defaultStepOptions =
     StepOptions
@@ -143,6 +171,7 @@ defaultStepOptions =
         , stepRetryDelayMs = 0
         }
 
+-- | The current terminal viewport text plus dimensions.
 data Viewport = Viewport
     { viewportCols :: Int
     , viewportRows :: Int
@@ -150,11 +179,13 @@ data Viewport = Viewport
     }
     deriving (Eq, Show)
 
+-- | Handle to the child process and PTY master descriptor.
 data PtyHandle = PtyHandle
     { ptyMaster :: Pty
     , ptyProcess :: ProcessHandle
     }
 
+-- | Mutable runtime state tracked while a test executes.
 data TuiState = TuiState
     { launchedApp :: Maybe App
     , visibleBuffer :: Text
@@ -165,6 +196,11 @@ data TuiState = TuiState
     , frameLog :: [Text]
     }
 
+{- | Runtime test handle passed into each spec body.
+
+This is intentionally opaque in normal test usage, even though
+record fields are exported for advanced integrations.
+-}
 data Tui = Tui
     { tuiName :: String
     , tuiOptions :: RunOptions
