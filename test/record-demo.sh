@@ -50,7 +50,7 @@ echo "Recording demo (delay=${DELAY}s between actions)..."
   send_and_sleep '{"jsonrpc":"2.0","id":12,"method":"sendKey","params":{"key":"q"}}' "$DELAY"
   send_and_sleep '{"jsonrpc":"2.0","id":13,"method":"recording.stop","params":{}}' 0.2
   echo '{"jsonrpc":"2.0","id":14,"method":"server.shutdown","params":null}'
-) | cabal run tuispec -- server --artifact-dir artifacts/demo-recording
+) | cabal run tuispec -- server --artifact-dir artifacts/demo-recording --rows 20 --cols 100
 
 echo ""
 echo "Recording saved to: $RECORDING_PATH"

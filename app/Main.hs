@@ -75,18 +75,21 @@ runCommand parsedCommand =
                     , Server.serverAmbiguityMode = ambiguity options
                     }
         Replay options -> do
-            -- Clear screen before starting frame replay
-            putStr "\ESC[2J\ESC[H"
+            -- Switch to alternate screen buffer and clear it
+            putStr "\ESC[?1049h\ESC[2J\ESC[H"
             hFlush stdout
             let callback = if replayShowInput options then displayFrameWithInput else displayFrameOnly
             frameCount <- streamReplayFrames (replaySpeed options) (replayInputPath options) callback
             if frameCount > 0
                 then do
-                    -- Ensure cursor is visible and move below viewport
-                    putStr "\ESC[?25h"
+                    -- Ensure cursor is visible, leave alternate screen buffer
+                    putStr "\ESC[?25h\ESC[?1049l"
                     hFlush stdout
-                    putStrLn ("\nReplayed " <> show frameCount <> " frames")
+                    putStrLn ("Replayed " <> show frameCount <> " frames")
                 else do
+                    -- Leave alternate screen buffer for request replay
+                    putStr "\ESC[?25h\ESC[?1049l"
+                    hFlush stdout
                     replayed <- streamReplayRequests (replaySpeed options) (replayInputPath options) TIO.putStrLn
                     putStrLn ("Replayed " <> show replayed <> " request messages")
 
