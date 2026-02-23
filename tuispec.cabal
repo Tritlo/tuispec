@@ -36,9 +36,15 @@ tested-with: ghc ==9.12.2
 extra-doc-files:
   CHANGELOG.md
   README.md
+  SERVER.md
+  SKILL.md
   SPEC.md
   doc/example-board.png
   doc/example-dashboard.png
+
+extra-source-files:
+  fonts/IosevkaMono-Regular.ttc
+  fonts/LICENSE
 
 source-repository head
   type: git
