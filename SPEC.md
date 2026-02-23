@@ -245,6 +245,24 @@ PNG renderer implementation details:
   - `TUISPEC_FONT_PATH`
   - built-in system fallback font paths
 
+CLI command: `tuispec replay`
+- input: JSONL recording file
+- options: `--speed as-fast-as-possible|real-time`
+- if recording contains `frame` events, replays them visually on the terminal
+  (clear screen + render each frame with original timing)
+- falls back to printing raw request lines when no frames are present
+
+### 8.1 Recording format
+
+Recording JSONL files contain one event per line:
+- `timestampMicros`: microseconds since POSIX epoch
+- `direction`: `request|response|notification|frame`
+- `line`: raw JSON-RPC line, or viewport text for `frame` events
+
+Frame events are captured by a background sampling thread during
+`recording.start` at a configurable rate (default 200ms = 5 Hz).
+Consecutive identical frames are deduplicated.
+
 ## 9. JSON-RPC Server
 
 CLI command:
@@ -279,7 +297,7 @@ Methods:
 - `viewSubscribe`
 - `viewUnsubscribe`
 - `batch`
-- `recording.start`
+- `recording.start` (optional `frameIntervalMs`, default 200 = 5 Hz)
 - `recording.stop`
 - `recording.status`
 - `replay`

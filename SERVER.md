@@ -214,8 +214,11 @@ If `includeText=true`, notification params also include `text`.
 ### Recording / Replay (JSONL)
 
 - `recording.start`
-  - params: `{ "path": FilePath }`
-  - result: `{ "ok": true, "path": FilePath }`
+  - params:
+    - `path` (required): output JSONL path
+    - `frameIntervalMs` (optional, default `200`): viewport sampling interval in
+      milliseconds. Set to `0` to disable frame capture. Default 200ms = 5 Hz.
+  - result: `{ "ok": true, "path": FilePath, "frameIntervalMs": Int }`
 
 - `recording.stop`
   - params: none
@@ -238,8 +241,13 @@ If `includeText=true`, notification params also include `text`.
 Recording files are JSONL with one event per line and include:
 
 - `timestampMicros`
-- `direction` (`request|response|notification`)
-- `line` (raw JSON-RPC line)
+- `direction` (`request|response|notification|frame`)
+- `line` (raw JSON-RPC line, or viewport text for `frame` events)
+
+When `frameIntervalMs > 0` (the default), the server spawns a background thread
+that samples the viewport at the configured rate. Only frames that differ from
+the previous sample are written. Frame events have `direction: "frame"` and
+their `line` field contains the rendered visible viewport text.
 
 ### Server Utility
 

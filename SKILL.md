@@ -200,13 +200,34 @@ cabal run tuispec -- render artifacts/server/sessions/demo/snapshots/after-enter
 cabal run tuispec -- render-text artifacts/server/sessions/demo/snapshots/after-enter.ansi.txt
 ```
 
+### JSONL recording with viewport frames
+
+Start recording with automatic viewport sampling (default 5 Hz):
+
+```json
+{"jsonrpc":"2.0","id":7,"method":"recording.start","params":{"path":"artifacts/server/demo.jsonl"}}
+```
+
+To change the sampling rate, pass `frameIntervalMs` (e.g. 100 for 10 Hz, 0 to
+disable frame capture):
+
+```json
+{"jsonrpc":"2.0","id":7,"method":"recording.start","params":{"path":"artifacts/server/demo.jsonl","frameIntervalMs":100}}
+```
+
 ### JSONL replay
 
-Replay recorded request lines from a JSONL file:
+Replay a recording visually on your terminal (frame-by-frame):
 
 ```bash
-cabal run tuispec -- replay artifacts/server/demo.jsonl --speed as-fast-as-possible
+cabal run tuispec -- replay artifacts/server/demo.jsonl --speed real-time
 ```
+
+If the recording contains viewport frames, the replay clears the screen and
+renders each frame in place with original timing. If no frames are present
+(older recordings), it falls back to printing the raw JSON-RPC request lines.
+
+Use `--speed as-fast-as-possible` to skip timing delays.
 
 For push-based polling alternatives, subscribe to view changes:
 
