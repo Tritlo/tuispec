@@ -1,6 +1,0 @@
-{
-  "tests": [
-    {"name": "brick panes main flow", "slug": "brick-panes-main-flow", "status": "passed", "durationMs": 2726, "attempts": 1, "artifacts": "tests/brick-panes-main-flow/attempt-final"},
-    {"name": "brick panes reset isolation", "slug": "brick-panes-reset-isolation", "status": "passed", "durationMs": 1181, "attempts": 1, "artifacts": "tests/brick-panes-reset-isolation/attempt-final"}
-  ]
-}
