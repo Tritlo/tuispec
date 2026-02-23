@@ -617,7 +617,7 @@ dispatchPing paramsValue =
                     ( Continue
                         ( object
                             [ "pong" .= True
-                            , "version" .= ("0.1.1.1" :: String)
+                            , "version" .= ("0.2.0.0" :: String)
                             ]
                         )
                     )

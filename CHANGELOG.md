@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.0.0 — 2026-02-23
+
+* Introduce server v2 APIs including launch `cwd`/nullable `env`, per-call ambiguity control, filtered `currentView`, render-in-one-step snapshot flows, notifications, batch operations, and JSONL recording/replay.
+* Add `tuispec replay` CLI command and expand end-to-end protocol coverage in tests and docs.
+
 ## 0.1.1.1 — 2026-02-23
 
 * Fix PTY teardown to avoid hangs when waiting for child exit by using bounded `getProcessExitCode` polling.
