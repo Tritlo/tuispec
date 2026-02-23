@@ -1,138 +1,37 @@
 # tuispec
 
-`tuispec` is a Haskell library for Playwright-like black-box testing of terminal UIs over PTY.
+[![Hackage](https://img.shields.io/hackage/v/tuispec.svg)](https://hackage.haskell.org/package/tuispec)
+[![MIT license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Current design:
-- tests are regular compiled Haskell programs (`tasty` + `tuispec`)
-- PTY transport only
-- per-test isolation (fresh PTY process per test)
-- text selectors + keypress/input actions
-- snapshot assertions with text + PNG artifacts
-- optional REPL-like session mode for ad-hoc exploration
+Playwright-like black-box testing for terminal UIs over PTY.
+
+`tuispec` is a Haskell library that lets you write reliable TUI tests as normal
+Haskell programs. Interact with any terminal application via PTY — send
+keystrokes, wait for text, and capture snapshots — without instrumenting the
+target app.
+
+## Example output
+
+Snapshots captured from the included [Brick demo app](example/app/Main.hs)
+using `tuispec`:
+
+| Dashboard | Board |
+|---|---|
+| ![Dashboard](doc/example-dashboard.png) | ![Board](doc/example-board.png) |
+
+## Features
+
+- **PTY transport** — tests interact with real terminal apps over PTY
+- **Per-test isolation** — fresh PTY process per test, no shared state
+- **Snapshot assertions** — baseline comparison with ANSI text + PNG artifacts
+- **Text selectors** — `Exact`, `Regex`, `At`, `Within`, `Nth`
+- **`tasty` integration** — tests are regular `tasty` test trees
+- **JSON-RPC server** — interactive orchestration via `tuispec server`
+- **REPL sessions** — ad-hoc exploration with `withTuiSession`
 
 ## Quick start
 
-Build the library:
-
-```bash
-cabal build
-```
-
-Run root smoke tests:
-
-```bash
-cabal test
-```
-
-Run the Brick demo integration suite:
-
-```bash
-cd example
-cabal test
-```
-
-## JSON-RPC server
-
-Run the interactive server:
-
-```bash
-cabal run tuispec -- server --artifact-dir artifacts/server
-```
-
-Transport:
-- JSON-RPC 2.0
-- newline-delimited JSON messages
-- read requests from stdin, write responses to stdout
-
-Core methods:
-- `initialize`
-- `launch`
-- `sendKey`
-- `sendText`
-- `sendLine`
-- `currentView`
-- `dumpView`
-- `expectVisible`
-- `expectNotVisible`
-- `waitForText`
-- `expectSnapshot`
-- `server.ping`
-- `server.shutdown`
-
-Example:
-
-```json
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"name":"demo"}}
-{"jsonrpc":"2.0","id":2,"method":"launch","params":{"command":"sh","args":[]}}
-{"jsonrpc":"2.0","id":3,"method":"sendLine","params":{"text":"echo hello"}}
-{"jsonrpc":"2.0","id":4,"method":"dumpView","params":{"name":"after-echo"}}
-{"jsonrpc":"2.0","id":5,"method":"server.shutdown","params":null}
-```
-
-Server artifacts for session `demo`:
-- `artifacts/server/sessions/demo/snapshots/<name>.ansi.txt`
-- `artifacts/server/sessions/demo/snapshots/<name>.meta.json`
-
-Shutdown behavior:
-- `server.shutdown` performs hard shutdown: sends `SIGKILL` to active child process group and exits immediately.
-- `SIGHUP` does the same hard shutdown behavior.
-
-Detailed protocol notes: `SERVER.md`
-
-## Snapshot layout
-
-For a test named `my test` (slug: `my-test`) and `artifactsDir = "artifacts"`:
-
-- Baselines:
-  - `artifacts/snapshots/my-test/<snapshot>.ansi.txt`
-  - `artifacts/snapshots/my-test/<snapshot>.meta.json`
-- Per-run capture:
-  - `artifacts/tests/my-test/snapshots/<snapshot>.ansi.txt`
-  - `artifacts/tests/my-test/snapshots/<snapshot>.meta.json`
-
-Render any ANSI snapshot to PNG:
-
-```bash
-cabal run tuispec -- render artifacts/tests/my-test/snapshots/<snapshot>.ansi.txt
-```
-
-`render` reads rows/cols from `<snapshot>.meta.json` automatically, with optional overrides via `--rows`, `--cols`, and `--theme` (theme defaults to `auto`).
-
-Render visible plain text from the ANSI stream (terminal-emulated):
-
-```bash
-cabal run tuispec -- render-text artifacts/tests/my-test/snapshots/<snapshot>.ansi.txt
-```
-
-`render-text` reads rows/cols from `<snapshot>.meta.json` automatically, with optional `--rows` and `--cols` overrides.
-
-## REPL-style usage
-
-For ad-hoc sessions (outside `tasty`), use `withTuiSession` and `dumpView`:
-
-```haskell
-{-# LANGUAGE OverloadedStrings #-}
-
-import TuiSpec
-
-main :: IO ()
-main =
-  withTuiSession
-    defaultRunOptions { artifactsDir = "artifacts/repl" }
-    "demo-repl"
-    $ \tui -> do
-        launch tui (App "my-tui" [])
-        sendLine tui "/help"
-        _ <- dumpView tui "step-1"
-        sendLine tui "q"
-```
-
-Artifacts land under:
-
-- `artifacts/repl/sessions/demo-repl/snapshots/<name>.ansi.txt`
-- `artifacts/repl/sessions/demo-repl/snapshots/<name>.meta.json`
-
-## Minimal example
+Add `tuispec` to your `build-depends` and write a test:
 
 ```haskell
 {-# LANGUAGE OverloadedStrings #-}
@@ -152,22 +51,133 @@ main =
     ]
 ```
 
-## Layout
+Run:
 
-- `src/TuiSpec.hs`: public API
-- `src/TuiSpec/Types.hs`: DSL and configuration types
-- `src/TuiSpec/Runner.hs`: PTY runner + assertions + snapshot renderer
-- `test/Spec.hs`: root smoke test
-- `example/app/Main.hs`: Brick demo app
-- `example/test/IntegrationSpec.hs`: integration test suite using `tuispec`
+```bash
+cabal test
+```
 
-## Brick example
+## Building from source
 
-- [Brick integration spec](example/test/IntegrationSpec.hs)
-- [Brick app](example/app/Main.hs)
+```bash
+cabal build
+```
 
-## Notes
+Run root smoke tests:
 
-- PNG rendering requires `python3` with Pillow (`PIL`).
-- Default viewport is `134x40`.
-- Snapshot theme mode defaults to `auto` (falls back to dark if unknown).
+```bash
+cabal test
+```
+
+Run the Brick demo integration suite:
+
+```bash
+cd example
+cabal test
+```
+
+## DSL overview
+
+### Actions
+
+```haskell
+launch    :: Tui -> App -> IO ()
+press     :: Tui -> Key -> IO ()
+pressCombo :: Tui -> [Modifier] -> Key -> IO ()
+typeText  :: Tui -> Text -> IO ()
+sendLine  :: Tui -> Text -> IO ()
+```
+
+### Waits and assertions
+
+```haskell
+waitForText    :: Tui -> Selector -> IO ()
+expectVisible  :: Tui -> Selector -> IO ()
+expectNotVisible :: Tui -> Selector -> IO ()
+expectSnapshot :: Tui -> SnapshotName -> IO ()
+dumpView       :: Tui -> SnapshotName -> IO FilePath
+```
+
+### Selectors
+
+```haskell
+Exact  Text           -- exact substring match
+Regex  Text           -- lightweight regex (|, .*, literal parens stripped)
+At     Int Int        -- position-based (col, row)
+Within Rect Selector  -- restrict to a rectangle
+Nth    Int Selector   -- pick the Nth match
+```
+
+### Keys
+
+Named keys: `Enter`, `Esc`, `Tab`, `Backspace`, arrows, `FunctionKey 1..12`
+
+Character keys: `CharKey c`, `Ctrl c`, `AltKey c`
+
+Combos: `pressCombo [Control] (CharKey 'c')`
+
+## Snapshots
+
+For a test named `my test` (slug: `my-test`) with `artifactsDir = "artifacts"`:
+
+- **Baselines**: `artifacts/snapshots/my-test/<snapshot>.ansi.txt`
+- **Per-run**: `artifacts/tests/my-test/snapshots/<snapshot>.ansi.txt`
+
+Render any ANSI snapshot to PNG:
+
+```bash
+cabal run tuispec -- render artifacts/tests/my-test/snapshots/<snapshot>.ansi.txt
+```
+
+Render visible plain text:
+
+```bash
+cabal run tuispec -- render-text artifacts/tests/my-test/snapshots/<snapshot>.ansi.txt
+```
+
+## JSON-RPC server
+
+```bash
+cabal run tuispec -- server --artifact-dir artifacts/server
+```
+
+Newline-delimited JSON-RPC 2.0 on stdin/stdout. See [SERVER.md](SERVER.md) for
+the full protocol reference.
+
+## REPL-style sessions
+
+For ad-hoc exploration outside `tasty`:
+
+```haskell
+withTuiSession defaultRunOptions "demo" $ \tui -> do
+  launch tui (App "sh" [])
+  sendLine tui "echo hello"
+  _ <- dumpView tui "step-1"
+  pure ()
+```
+
+## Configuration
+
+`RunOptions` fields (all overridable via environment variables):
+
+| Field | Default | Env var |
+|---|---|---|
+| `timeoutSeconds` | `5` | `TUISPEC_TIMEOUT_SECONDS` |
+| `retries` | `0` | `TUISPEC_RETRIES` |
+| `stepRetries` | `0` | `TUISPEC_STEP_RETRIES` |
+| `terminalCols` | `134` | `TUISPEC_TERMINAL_COLS` |
+| `terminalRows` | `40` | `TUISPEC_TERMINAL_ROWS` |
+| `artifactsDir` | `"artifacts"` | `TUISPEC_ARTIFACTS_DIR` |
+| `updateSnapshots` | `False` | `TUISPEC_UPDATE_SNAPSHOTS` |
+| `ambiguityMode` | `FailOnAmbiguous` | `TUISPEC_AMBIGUITY_MODE` |
+| `snapshotTheme` | `"auto"` | `TUISPEC_SNAPSHOT_THEME` |
+
+## Requirements
+
+- GHC 9.12+
+- Linux terminal environment (PTY-based)
+- `python3` with Pillow for PNG rendering
+
+## License
+
+[MIT](LICENSE) — Matthias Pall Gissurarson
