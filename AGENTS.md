@@ -29,6 +29,13 @@ When changing Haskell or cabal files:
 ## Coding Conventions
 - All exported functions and data types must have Haddock documentation comments (`-- |`).
 
+## Documentation
+When changing server methods, CLI commands, or the recording/replay format,
+always update the corresponding docs:
+- `SERVER.md` — JSON-RPC method reference
+- `SKILL.md` — REPL/server operator workflow
+- `SPEC.md` — full specification
+
 ## Useful Test Commands
 - Smoke test:
   - `cabal test`
