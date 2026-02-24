@@ -1,6 +1,6 @@
 # tuispec Specification
 
-Last updated: 2026-02-23
+Last updated: 2026-02-24
 Status: current implementation
 
 ## 1. Purpose
@@ -203,7 +203,6 @@ Hard test timeout:
 - `TUISPEC_TERMINAL_ROWS`
 - `TUISPEC_ARTIFACTS_DIR`
 - `TUISPEC_UPDATE_SNAPSHOTS`
-- `TUISPEC_AMBIGUITY_MODE` (`fail|first|first-visible`)
 - `TUISPEC_AMBIGUITY_MODE` (`fail|first|first-visible|last|last-visible`)
 - `TUISPEC_SNAPSHOT_THEME`
 

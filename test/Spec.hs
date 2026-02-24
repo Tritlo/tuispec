@@ -94,6 +94,21 @@ main =
                         expectNotVisible tui (Exact "\ESC[31mstyled text\ESC[0m")
                         sendLine tui "exit"
                     )
+            , testCase "smoke: waitForStable detects viewport stability" $
+                withTuiSession
+                    defaultRunOptions
+                        { timeoutSeconds = 8
+                        , artifactsDir = "artifacts/wait-stable-smoke"
+                        , ambiguityMode = FirstVisibleMatch
+                        }
+                    "wait-stable"
+                    ( \tui -> do
+                        launch tui (app "sh" [])
+                        sendLine tui "printf 'stable output\\n'"
+                        waitForText tui (Exact "stable output")
+                        waitForStable tui defaultWaitOptions{timeoutMs = 5000} 300
+                        sendLine tui "exit"
+                    )
             , testCase "server: additions end-to-end" testServerAdditions
             , testCase "server: notifications" testServerNotifications
             , testCase "server: recording + replay JSONL + CLI" testServerRecordingReplay

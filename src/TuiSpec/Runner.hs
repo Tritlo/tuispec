@@ -36,15 +36,15 @@ module TuiSpec.Runner (
 ) where
 
 import Control.Concurrent (threadDelay)
-import Control.Exception (Exception, SomeException, catch, displayException, finally, throwIO, toException, try)
+import Control.Exception (Exception, SomeException, displayException, finally, throwIO, toException, try)
 import Control.Monad (unless, when)
 import Data.Aeson (encode, object, (.=))
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
-import Data.Char (chr, isAlphaNum, ord, toLower)
+import Data.Char (chr, ord, toLower)
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import Data.IntMap.Strict qualified as IM
-import Data.List (intercalate, isSuffixOf, nub, sort)
+import Data.List (intercalate, nub, sort)
 import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -64,6 +64,7 @@ import System.Timeout (timeout)
 import Test.Tasty (TestTree)
 import Test.Tasty.HUnit (assertFailure, testCase)
 import Text.Read (readMaybe)
+import TuiSpec.Internal (cleanPattern, ignoreIOError, regexLikeMatch, resolveAutoSnapshotTheme, safeFileStem, safeIndex, snapshotMetadataPath, wildcardContains)
 import TuiSpec.ProjectRoot (resolveProjectRoot)
 import TuiSpec.Types
 
@@ -810,7 +811,7 @@ drainPtyOutput pty = BS.concat . reverse <$> go 0 []
                             pure acc
 
 {- | A terminal color, either an exact RGB triple or a palette index (0–15)
-that is resolved against the active 'ThemePalette' at render time.
+that is resolved against the active t'ThemePalette' at render time.
 -}
 data EmuColor
     = EmuColor Int Int Int
@@ -998,10 +999,10 @@ defaultStyledCell theme =
             , styledBgColor = paletteDefaultBg palette
             }
 
-{- | Resolve an 'EmuColor' against the theme palette.
+{- | Resolve an t'EmuColor' against the theme palette.
 
-'EmuPaletteColor' indices are looked up in the theme's 16-color table;
-literal 'EmuColor' RGB triples pass through unchanged.
+v'EmuPaletteColor' indices are looked up in the theme's 16-color table;
+literal v'EmuColor' RGB triples pass through unchanged.
 -}
 resolveColor :: ThemePalette -> EmuColor -> EmuColor
 resolveColor _ (EmuColor r g b) = EmuColor r g b
@@ -1499,34 +1500,6 @@ regexAlternativeCount alternative haystack
         if wildcardContains alternative haystack then 1 else 0
     | otherwise = occurrenceCount alternative haystack
 
-regexLikeMatch :: Text -> Text -> Bool
-regexLikeMatch patternText haystack =
-    any (`wildcardContains` haystack) alternatives
-  where
-    alternatives =
-        filter (not . T.null) $
-            map cleanPattern (T.splitOn "|" patternText)
-
-cleanPattern :: Text -> Text
-cleanPattern = T.filter (`notElem` ("()" :: String))
-
-wildcardContains :: Text -> Text -> Bool
-wildcardContains patternText haystack =
-    checkSegments 0 segments
-  where
-    segments = filter (not . T.null) (T.splitOn ".*" patternText)
-
-    checkSegments :: Int -> [Text] -> Bool
-    checkSegments _ [] = True
-    checkSegments fromIdx (segment : rest) =
-        let remaining = T.drop fromIdx haystack
-            (prefix, suffix) = T.breakOn segment remaining
-         in if T.null suffix
-                then False
-                else
-                    let nextStart = fromIdx + T.length prefix + T.length segment
-                     in checkSegments nextStart rest
-
 occurrenceCount :: Text -> Text -> Int
 occurrenceCount needle haystack
     | T.null needle = 0
@@ -1556,15 +1529,6 @@ cropRect rect textValue =
     w = rectWidth rect
     selectedRows = take h (drop y linesInViewport)
     croppedLines = map (T.take w . T.drop x) selectedRows
-
-safeIndex :: Int -> [a] -> Maybe a
-safeIndex indexValue values
-    | indexValue < 0 = Nothing
-    | otherwise = go indexValue values
-  where
-    go _ [] = Nothing
-    go 0 (x : _) = Just x
-    go n (_ : xs) = go (n - 1) xs
 
 safeTextIndex :: Int -> Text -> Maybe Char
 safeTextIndex indexValue textValue
@@ -1621,32 +1585,8 @@ resetDirectory dir = do
     exists <- doesDirectoryExist dir
     when exists (removePathForcibly dir)
 
-safeFileStem :: String -> String
-safeFileStem input =
-    let lowered = map toLower input
-        normalized = map normalize lowered
-        compact = collapseDashes normalized
-        trimmed = trimDashes compact
-     in if null trimmed then "snapshot" else trimmed
-  where
-    normalize c
-        | isAlphaNum c = c
-        | otherwise = '-'
-
-    collapseDashes [] = []
-    collapseDashes ('-' : '-' : rest) = collapseDashes ('-' : rest)
-    collapseDashes (c : rest) = c : collapseDashes rest
-
-    trimDashes = reverse . dropWhile (== '-') . reverse . dropWhile (== '-')
-
 slugify :: String -> String
 slugify = safeFileStem
-
-snapshotMetadataPath :: FilePath -> FilePath
-snapshotMetadataPath ansiPath =
-    if ".ansi.txt" `isSuffixOf` ansiPath
-        then take (length ansiPath - length (".ansi.txt" :: String)) ansiPath <> ".meta.json"
-        else ansiPath <> ".meta.json"
 
 writeSnapshotMetadata :: FilePath -> Int -> Int -> IO ()
 writeSnapshotMetadata metaPath rows cols =
@@ -1743,35 +1683,6 @@ envAmbiguity key = do
             "fail" -> Just FailOnAmbiguous
             "first" -> Just FirstVisibleMatch
             "first-visible" -> Just FirstVisibleMatch
+            "last" -> Just LastVisibleMatch
+            "last-visible" -> Just LastVisibleMatch
             _ -> Nothing
-
-resolveAutoSnapshotTheme :: String -> Maybe String -> String
-resolveAutoSnapshotTheme requestedTheme colorFgBgValue =
-    case map toLower requestedTheme of
-        "auto" ->
-            case detectTerminalBackground colorFgBgValue of
-                Just "light" -> "pty-default-light"
-                _ -> "pty-default-dark"
-        _ -> requestedTheme
-
-detectTerminalBackground :: Maybe String -> Maybe String
-detectTerminalBackground colorFgBgValue =
-    case colorFgBgValue >>= parseBgIndex of
-        Just bgIndex | bgIndex >= 7 -> Just "light"
-        Just _ -> Just "dark"
-        Nothing -> Nothing
-  where
-    parseBgIndex raw =
-        case reverse (splitOn ';' raw) of
-            [] -> Nothing
-            lastPart : _ -> (readMaybe lastPart :: Maybe Int)
-
-    splitOn _ [] = [""]
-    splitOn delimiter input =
-        case break (== delimiter) input of
-            (headPart, []) -> [headPart]
-            (headPart, _ : rest) -> headPart : splitOn delimiter rest
-
-ignoreIOError :: IO () -> IO ()
-ignoreIOError action =
-    action `catch` \(_ :: SomeException) -> pure ()

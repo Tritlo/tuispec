@@ -23,7 +23,7 @@ import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy qualified as BL
 import Data.ByteString.Lazy.Char8 qualified as BL8
-import Data.Char (isAlphaNum, toLower)
+import Data.Char (toLower)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Int (Int64)
 import Data.List (isSuffixOf)
@@ -43,6 +43,7 @@ import System.IO (hFlush, stdin, stdout)
 import System.IO.Error (isEOFError, tryIOError)
 import System.Posix.Process (exitImmediately)
 import System.Posix.Signals (Handler (Catch), installHandler, sigHUP)
+import TuiSpec.Internal (regexLikeMatch, safeFileStem, safeIndex, snapshotMetadataPath)
 import TuiSpec.Render (renderAnsiSnapshotFileWithFont)
 import TuiSpec.Replay (RecordingDirection (DirectionFrame, DirectionFrameDelta, DirectionNotification, DirectionRequest, DirectionResponse), RecordingHandle, ReplaySpeed (ReplayAsFastAsPossible, ReplayRealTime), appendRecordingEvent, closeRecording, computeFrameDelta, openRecording, streamReplayRequests)
 import TuiSpec.Runner (currentView, defaultWaitOptionsFor, dumpView, expectNotVisible, expectSnapshot, expectVisible, killSessionChildrenNow, launch, openSession, press, pressCombo, renderAnsiViewportText, sendLine, serializeAnsiSnapshot, typeText, waitForSelectorWithAmbiguity, waitForStable)
@@ -345,7 +346,7 @@ dispatchDumpView state paramsValue =
                     let tui = activeTui active
                     ansiPathRaw <- dumpView tui (SnapshotName (dumpName params))
                     ansiPath <- canonicalizeExistingPath ansiPathRaw
-                    metaPath <- canonicalizeExistingPath (snapshotMetaPath ansiPath)
+                    metaPath <- canonicalizeExistingPath (snapshotMetadataPath ansiPath)
                     artifactRoot <- canonicalizePath (tuiTestRoot tui)
                     maybePngPath <-
                         case dumpFormat params of
@@ -372,7 +373,7 @@ dispatchRenderView state paramsValue =
                     let tui = activeTui active
                     ansiPathRaw <- dumpView tui (SnapshotName (renderViewName params))
                     ansiPath <- canonicalizeExistingPath ansiPathRaw
-                    metaPath <- canonicalizeExistingPath (snapshotMetaPath ansiPath)
+                    metaPath <- canonicalizeExistingPath (snapshotMetadataPath ansiPath)
                     artifactRoot <- canonicalizePath (tuiTestRoot tui)
                     pngPath <- renderSnapshotFromRenderView params ansiPath
                     pure
@@ -392,7 +393,7 @@ dispatchExpectSnapshot state paramsValue =
             Right params ->
                 runMethod $ do
                     let snapshotText = expectSnapshotNameValue params
-                    let snapshotStem = safeSnapshotStem (T.unpack snapshotText)
+                    let snapshotStem = safeFileStem (T.unpack snapshotText)
                     let tui = activeTui active
                     let actualPath = tuiTestRoot tui </> "snapshots" </> (snapshotStem <> ".ansi.txt")
                     let baselinePath = tuiSnapshotRoot tui </> (snapshotStem <> ".ansi.txt")
@@ -1629,15 +1630,6 @@ sliceColumns :: Int -> Int -> Text -> Text
 sliceColumns startCol endCol lineText =
     T.take (endCol - startCol + 1) (T.drop (startCol - 1) lineText)
 
-safeIndex :: Int -> [a] -> Maybe a
-safeIndex idx values
-    | idx < 0 = Nothing
-    | otherwise = go idx values
-  where
-    go _ [] = Nothing
-    go 0 (x : _) = Just x
-    go n (_ : rest) = go (n - 1) rest
-
 renderSnapshotFromDump :: DumpViewParams -> FilePath -> IO FilePath
 renderSnapshotFromDump params ansiPath = do
     let pngPath = defaultPngPath ansiPath
@@ -1674,12 +1666,6 @@ canonicalizeExistingPath path = do
     if exists
         then canonicalizePath path
         else pure path
-
-snapshotMetaPath :: FilePath -> FilePath
-snapshotMetaPath ansiPath =
-    if ".ansi.txt" `isSuffixOf` ansiPath
-        then take (length ansiPath - length (".ansi.txt" :: String)) ansiPath <> ".meta.json"
-        else ansiPath <> ".meta.json"
 
 data SnapshotDiffResult = SnapshotDiffResult
     { diffChanged :: Bool
@@ -1735,7 +1721,7 @@ loadComparableSnapshot options mode path = do
 
 loadSnapshotDimensions :: FilePath -> RunOptions -> IO (Int, Int)
 loadSnapshotDimensions path options = do
-    let metaPath = snapshotMetaPath path
+    let metaPath = snapshotMetadataPath path
     metaExists <- doesFileExist metaPath
     if not metaExists
         then pure (terminalRows options, terminalCols options)
@@ -1835,52 +1821,6 @@ replayRecordedRequestLine state lineText =
                                         )
                                     )
                             Right _ -> pure ()
-
-regexLikeMatch :: Text -> Text -> Bool
-regexLikeMatch patternText haystack =
-    any (`wildcardContains` haystack) alternatives
-  where
-    alternatives =
-        filter (not . T.null) $
-            map cleanPattern (T.splitOn "|" patternText)
-
-cleanPattern :: Text -> Text
-cleanPattern = T.filter (`notElem` ("()" :: String))
-
-wildcardContains :: Text -> Text -> Bool
-wildcardContains patternText haystack =
-    checkSegments 0 segments
-  where
-    segments = filter (not . T.null) (T.splitOn ".*" patternText)
-
-    checkSegments :: Int -> [Text] -> Bool
-    checkSegments _ [] = True
-    checkSegments fromIdx (segment : rest) =
-        let remaining = T.drop fromIdx haystack
-            (prefix, suffix) = T.breakOn segment remaining
-         in if T.null suffix
-                then False
-                else
-                    let nextStart = fromIdx + T.length prefix + T.length segment
-                     in checkSegments nextStart rest
-
-safeSnapshotStem :: String -> String
-safeSnapshotStem input =
-    let lowered = map toLower input
-        normalized = map normalize lowered
-        compact = collapseDashes normalized
-        trimmed = trimDashes compact
-     in if null trimmed then "snapshot" else trimmed
-  where
-    normalize c
-        | isAlphaNum c = c
-        | otherwise = '-'
-
-    collapseDashes [] = []
-    collapseDashes ('-' : '-' : rest) = collapseDashes ('-' : rest)
-    collapseDashes (c : rest) = c : collapseDashes rest
-
-    trimDashes = reverse . dropWhile (== '-') . reverse . dropWhile (== '-')
 
 fromMaybeText :: Text -> Maybe Text -> Text
 fromMaybeText fallback maybeValue =

@@ -56,6 +56,8 @@ module TuiSpec (
     -- * Configuration types
     RunOptions (..),
     defaultRunOptions,
+    defaultWaitOptions,
+    defaultWaitOptionsFor,
     App (..),
     app,
     Key (..),

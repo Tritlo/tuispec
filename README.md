@@ -94,6 +94,7 @@ sendLine  :: Tui -> Text -> IO ()
 
 ```haskell
 waitForText    :: Tui -> Selector -> IO ()
+waitForStable  :: Tui -> WaitOptions -> Int -> IO ()
 expectVisible  :: Tui -> Selector -> IO ()
 expectNotVisible :: Tui -> Selector -> IO ()
 expectSnapshot :: Tui -> SnapshotName -> IO ()

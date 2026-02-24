@@ -16,11 +16,10 @@ module TuiSpec.Render (
 ) where
 
 import Control.Applicative ((<|>))
-import Control.Exception (SomeException, catch, throwIO)
+import Control.Exception (throwIO)
 import Data.Aeson (FromJSON (parseJSON), eitherDecode, withObject, (.:))
 import Data.ByteString.Lazy qualified as BL
-import Data.Char (toLower)
-import Data.List (intercalate, isSuffixOf)
+import Data.List (intercalate)
 import Data.Maybe (fromMaybe)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
@@ -30,7 +29,7 @@ import System.Exit (ExitCode (ExitSuccess))
 import System.FilePath (takeDirectory)
 import System.IO (hClose, openTempFile)
 import System.Process (proc, readCreateProcessWithExitCode)
-import Text.Read (readMaybe)
+import TuiSpec.Internal (ignoreIOError, resolveAutoSnapshotTheme, snapshotMetadataPath)
 import TuiSpec.Runner (renderAnsiViewportText, serializeAnsiSnapshot)
 import TuiSpec.Types (defaultRunOptions, terminalCols, terminalRows)
 
@@ -136,12 +135,6 @@ loadSnapshotMetadata ansiPath = do
                             Just metadataValue
                     Right _ -> Nothing
 
-snapshotMetadataPath :: FilePath -> FilePath
-snapshotMetadataPath ansiPath =
-    if ".ansi.txt" `isSuffixOf` ansiPath
-        then take (length ansiPath - length (".ansi.txt" :: String)) ansiPath <> ".meta.json"
-        else ansiPath <> ".meta.json"
-
 pythonStyledRenderScript :: String
 pythonStyledRenderScript =
     unlines
@@ -234,34 +227,3 @@ defaultFallbackFontPaths =
     , "/System/Library/Fonts/Menlo.ttc"
     , "/Library/Fonts/Menlo.ttc"
     ]
-
-resolveAutoSnapshotTheme :: String -> Maybe String -> String
-resolveAutoSnapshotTheme requestedTheme colorFgBgValue =
-    case map toLower requestedTheme of
-        "auto" ->
-            case detectTerminalBackground colorFgBgValue of
-                Just "light" -> "pty-default-light"
-                _ -> "pty-default-dark"
-        _ -> requestedTheme
-
-detectTerminalBackground :: Maybe String -> Maybe String
-detectTerminalBackground colorFgBgValue =
-    case colorFgBgValue >>= parseBgIndex of
-        Just bgIndex | bgIndex >= 7 -> Just "light"
-        Just _ -> Just "dark"
-        Nothing -> Nothing
-  where
-    parseBgIndex raw =
-        case reverse (splitOn ';' raw) of
-            [] -> Nothing
-            lastPart : _ -> (readMaybe lastPart :: Maybe Int)
-
-    splitOn _ [] = [""]
-    splitOn delimiter input =
-        case break (== delimiter) input of
-            (headPart, []) -> [headPart]
-            (headPart, _ : rest) -> headPart : splitOn delimiter rest
-
-ignoreIOError :: IO () -> IO ()
-ignoreIOError action =
-    action `catch` \(_ :: SomeException) -> pure ()

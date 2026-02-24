@@ -63,6 +63,7 @@ library
     TuiSpec.Types
 
   other-modules:
+    TuiSpec.Internal
     TuiSpec.ProjectRoot
 
   build-depends:
@@ -76,10 +77,10 @@ library
     posix-pty >=0.2 && <0.3,
     process >=1.6 && <1.7,
     tasty >=1.4 && <1.6,
-    tasty-hunit >=0.10 && <0.11,
+    tasty-hunit >=0.10 && <0.12,
     text >=1.2 && <2.2,
     time >=1.9 && <1.15,
-    unix >=2.8 && <2.9,
+    unix >=2.8 && <2.10,
 
 executable tuispec
   import: common-settings
@@ -92,7 +93,7 @@ executable tuispec
     optparse-applicative >=0.18 && <0.20,
     text >=1.2 && <2.2,
     tuispec,
-    unix >=2.8 && <2.9,
+    unix >=2.8 && <2.10,
 
 test-suite tuispec-smoke
   import: common-settings
@@ -108,6 +109,6 @@ test-suite tuispec-smoke
     process >=1.6 && <1.7,
     scientific >=0.3 && <0.4,
     tasty >=1.4 && <1.6,
-    tasty-hunit >=0.10 && <0.11,
+    tasty-hunit >=0.10 && <0.12,
     text >=1.2 && <2.2,
     tuispec,
