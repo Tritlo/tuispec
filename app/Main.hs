@@ -4,6 +4,7 @@ import Control.Concurrent (threadDelay)
 import Control.Exception (bracket_)
 import Data.List (isSuffixOf)
 import Data.Text (Text)
+import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import Data.Version (showVersion)
 import Options.Applicative
@@ -14,7 +15,7 @@ import System.Posix.Terminal (TerminalAttributes, getTerminalAttributes, setTerm
 import System.Posix.Terminal qualified as Posix
 import Text.Read (readMaybe)
 import TuiSpec.Render (renderAnsiSnapshotFileWithFont, renderAnsiSnapshotTextFile)
-import TuiSpec.Replay (ReplayFrame (..), ReplaySpeed (ReplayAsFastAsPossible, ReplayRealTime), loadReplayFrames, streamReplayFrames, streamReplayRequests)
+import TuiSpec.Replay (ReplayFrame (..), ReplaySpeed (ReplayAsFastAsPossible, ReplayRealTime), applyDelta, loadReplayFrames, streamReplayFrames, streamReplayRequests)
 import TuiSpec.Server qualified as Server
 import TuiSpec.Types (AmbiguityMode (FailOnAmbiguous, FirstVisibleMatch, LastVisibleMatch))
 
@@ -376,6 +377,7 @@ data ReplayKey
     | KeyRight
     | KeyUp
     | KeyDown
+    | KeyRedraw
     | KeyQuit
     | KeyUnknown
 
@@ -445,6 +447,11 @@ interactiveReplay speed showInput frameList = do
                 let newIdx = min (total - 1) (idx + 5)
                 displayFrame showInput (snd (frames !! newIdx)) newIdx total paused
                 go frames newIdx total paused
+            Just KeyRedraw -> do
+                let rebuiltText = rebuildFromKeyframe frames idx
+                    rebuiltFrame = (snd (frames !! idx)){replayFrameText = rebuiltText}
+                displayFrame showInput rebuiltFrame idx total paused
+                go frames idx total paused
             Just KeyUnknown -> go frames idx total paused
             Nothing ->
                 -- Timeout expired, advance to next frame
@@ -478,7 +485,7 @@ displayFrame showInput frame idx total paused = do
     -- Status bar: frame counter and pause state
     putStr "\n\ESC[7m "
     putStr (show (idx + 1) <> "/" <> show total)
-    if paused then putStr " [PAUSED] Space:play Left/Right:step Up/Down:skip5 q:quit" else pure ()
+    if paused then putStr " [PAUSED] Space:play Left/Right:step Up/Down:skip5 r:redraw q:quit" else pure ()
     putStr " \ESC[0m\ESC[K"
     hFlush stdout
 
@@ -493,6 +500,7 @@ readKeyRaw = do
     case c of
         'q' -> pure KeyQuit
         ' ' -> pure KeySpace
+        'r' -> pure KeyRedraw
         '\ESC' -> do
             -- Could be an arrow key escape sequence
             ready <- hReady stdin
@@ -556,3 +564,22 @@ waitWithTimeout totalMicros = go totalMicros
 -- | Index a list with positions.
 listToIndexed :: [a] -> [(Int, a)]
 listToIndexed = zip [0 ..]
+
+{- | Reconstruct frame text by finding the last keyframe and applying
+all subsequent deltas forward to the target index.
+-}
+rebuildFromKeyframe :: [(Int, ReplayFrame)] -> Int -> T.Text
+rebuildFromKeyframe frames targetIdx =
+    let keyIdx = case [i | (i, f) <- take (targetIdx + 1) frames, replayFrameIsKeyframe f] of
+            [] -> 0
+            xs -> last xs
+        keyText = replayFrameText (snd (frames !! keyIdx))
+        deltas = [(i, f) | (i, f) <- frames, i > keyIdx, i <= targetIdx]
+        nl = T.pack "\n"
+        baseLines = T.splitOn nl keyText
+     in T.intercalate nl (foldl' applyDeltaStep baseLines deltas)
+  where
+    applyDeltaStep currentLines (_, f) =
+        case replayFrameDelta f of
+            Just deltaText -> applyDelta currentLines deltaText
+            Nothing -> T.splitOn (T.pack "\n") (replayFrameText f)

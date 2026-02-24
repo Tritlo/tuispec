@@ -13,6 +13,7 @@ module TuiSpec.Replay (
     RecordingDirection (..),
     ReplayFrame (..),
     ReplaySpeed (..),
+    applyDelta,
     appendRecordingEvent,
     closeRecording,
     computeFrameDelta,
@@ -356,6 +357,10 @@ data ReplayFrame = ReplayFrame
     { replayFrameText :: Text
     , replayFrameInput :: Maybe Text
     , replayFrameTimestampMicros :: Int64
+    , replayFrameIsKeyframe :: Bool
+    -- ^ Whether this frame was a full keyframe (@True@) or reconstructed from a delta (@False@).
+    , replayFrameDelta :: Maybe Text
+    -- ^ Raw delta payload for non-keyframe frames, 'Nothing' for keyframes.
     }
     deriving (Eq, Show)
 
@@ -399,6 +404,8 @@ loadReplayFrames path =
                                             { replayFrameText = recordingLine event
                                             , replayFrameInput = lastInput
                                             , replayFrameTimestampMicros = recordingTimestampMicros event
+                                            , replayFrameIsKeyframe = True
+                                            , replayFrameDelta = Nothing
                                             }
                                 go fileHandle currentLinesRef lastInputRef (lineNumber + 1) (frame : acc)
                             | recordingDirection event == DirectionFrameDelta -> do
@@ -412,6 +419,8 @@ loadReplayFrames path =
                                             { replayFrameText = fullText
                                             , replayFrameInput = lastInput
                                             , replayFrameTimestampMicros = recordingTimestampMicros event
+                                            , replayFrameIsKeyframe = False
+                                            , replayFrameDelta = Just (recordingLine event)
                                             }
                                 go fileHandle currentLinesRef lastInputRef (lineNumber + 1) (frame : acc)
                             | otherwise ->

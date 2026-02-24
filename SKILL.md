@@ -232,6 +232,18 @@ To show the last input action below the viewport during replay:
 cabal run tuispec -- replay artifacts/server/demo.jsonl --show-input
 ```
 
+#### Interactive replay controls
+
+When replaying on a TTY, the following keyboard controls are available:
+
+| Key         | Action                          |
+|-------------|---------------------------------|
+| Space       | Pause / resume playback         |
+| Left/Right  | Step one frame backward/forward |
+| Up/Down     | Skip 5 frames backward/forward  |
+| r           | Redraw current frame            |
+| q / Esc     | Quit                            |
+
 For push-based polling alternatives, subscribe to view changes:
 
 ```json
