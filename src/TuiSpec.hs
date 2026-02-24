@@ -35,6 +35,7 @@ module TuiSpec (
 
     -- * Waits and assertions
     waitFor,
+    waitForStable,
     waitForText,
     waitForSelector,
     expectVisible,

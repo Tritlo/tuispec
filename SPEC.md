@@ -111,6 +111,7 @@ When `App.cwd` is provided, launch runs in that working directory.
 ### 4.4 Waits and assertions
 
 - `waitFor :: Tui -> WaitOptions -> (Viewport -> Bool) -> IO ()`
+- `waitForStable :: Tui -> WaitOptions -> Int -> IO ()`
 - `waitForText :: Tui -> Selector -> IO ()`
 - `waitForSelector :: Tui -> WaitOptions -> Selector -> IO ()`
 - `expectVisible :: Tui -> Selector -> IO ()`
@@ -122,6 +123,12 @@ Behavior:
 - `waitForText` / `expectVisible` use `timeoutSeconds` from `RunOptions`
 - matching runs on rendered viewport text (ANSI control/style escapes are interpreted)
 - ambiguity checking runs after positive selector match
+
+`waitForStable` semantics:
+- polls viewport at `pollIntervalMs` intervals
+- returns once viewport text has been unchanged for `debounceMs` consecutive milliseconds
+- throws timeout error if overall `timeoutMs` is exceeded
+- replaces brittle fixed `threadDelay` calls with semantic stability checks
 
 ### 4.5 Selector language
 
@@ -294,6 +301,7 @@ Methods:
 - `dumpView`
 - `renderView`
 - `waitUntil`
+- `waitForStable`
 - `diffView`
 - `expectSnapshot`
 - `waitForText`

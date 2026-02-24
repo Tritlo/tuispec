@@ -31,6 +31,7 @@ module TuiSpec.Runner (
     defaultWaitOptionsFor,
     withTuiSession,
     waitFor,
+    waitForStable,
     waitForText,
 ) where
 
@@ -307,6 +308,35 @@ waitFor tui waitOptions predicate = do
                     else do
                         threadDelay (pollIntervalMs waitOptions * 1000)
                         loop startedAt
+
+{- | Wait until the viewport text has not changed for @debounceMs@ milliseconds.
+
+This replaces brittle fixed @threadDelay@ calls with a semantic stability
+check: the viewport is polled at @pollIntervalMs@ intervals, and the call
+returns once the visible text has remained identical for at least @debounceMs@
+consecutive milliseconds. Throws on overall timeout.
+-}
+waitForStable :: Tui -> WaitOptions -> Int -> IO ()
+waitForStable tui waitOptions debounceMs = do
+    start <- getCurrentTime
+    initialView <- syncVisibleBuffer tui
+    loop start initialView start
+  where
+    timeoutLimit = fromIntegral (timeoutMs waitOptions) / 1000 :: NominalDiffTime
+    debounceLimit = fromIntegral debounceMs / 1000 :: NominalDiffTime
+
+    loop :: UTCTime -> Text -> UTCTime -> IO ()
+    loop startedAt lastView lastChangedAt = do
+        threadDelay (pollIntervalMs waitOptions * 1000)
+        now <- getCurrentTime
+        if diffUTCTime now startedAt >= timeoutLimit
+            then throwIO (AssertionError "waitForStable timed out")
+            else do
+                currentText <- syncVisibleBuffer tui
+                let changedAt = if currentText /= lastView then now else lastChangedAt
+                if diffUTCTime now changedAt >= debounceLimit
+                    then pure ()
+                    else loop startedAt currentText changedAt
 
 {- | Capture and compare the current PTY screen against a named snapshot.
 

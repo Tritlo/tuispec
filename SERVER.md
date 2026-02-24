@@ -109,6 +109,16 @@ Defaults:
     - optional `pollIntervalMs`
   - result: `ok`
 
+- `waitForStable`
+  - params:
+    - `debounceMs` (required): viewport must be unchanged for this many milliseconds
+    - optional `timeoutMs`: overall timeout (defaults to session `timeoutSeconds × 1000`)
+    - optional `pollIntervalMs`: poll interval (default `100`)
+  - result: `ok`
+  - Polls the viewport at `pollIntervalMs` intervals and returns once the visible
+    text has remained identical for at least `debounceMs` consecutive milliseconds.
+    Use this instead of fixed sleeps to wait for TUI output to settle.
+
 ### View / Snapshot
 
 - `currentView`

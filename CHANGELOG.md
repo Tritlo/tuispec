@@ -2,6 +2,8 @@
 
 ## 0.2.0.0 — 2026-02-24
 
+* Add `waitForStable` primitive (DSL + JSON-RPC) to replace fixed sleeps with debounce-based viewport stability checks.
+* Overhaul `SKILL.md` around a golden-path workflow using `waitForStable`, with a wait-strategy decision guide and common failure troubleshooting.
 * Introduce server v2 APIs including launch `cwd`/nullable `env`, per-call ambiguity control, filtered `currentView`, render-in-one-step snapshot flows, notifications, batch operations, and JSONL recording/replay.
 * Add `tuispec replay` CLI command and expand end-to-end protocol coverage in tests and docs.
 * Record viewport frames in JSONL sessions and replay them on the terminal with `tuispec replay`, using delta compression for efficient frame storage.

@@ -4,8 +4,29 @@ This skill explains how to use `tuispec` as a REPL-like driver for TUIs:
 
 1. launch a TUI
 2. send commands/keys
-3. periodically dump current view snapshots
-4. render those snapshots as text/PNG
+3. wait for stable output (no more fixed sleeps)
+4. dump and view snapshots
+
+## Golden path: wait for stability, not time
+
+The most common mistake in TUI testing is using fixed sleeps (`threadDelay`)
+to wait for output. This is inherently flaky — timing varies across machines,
+CI providers, and load conditions.
+
+**Always use `waitForStable` instead of `threadDelay`.**
+
+`waitForStable` polls the viewport and returns once the visible text has been
+unchanged for a configurable debounce period. This makes tests both faster
+(no over-sleeping) and more reliable (no under-sleeping).
+
+## Choosing a wait strategy
+
+| Situation | Use | Why |
+|-----------|-----|-----|
+| Wait for output to settle after an action | `waitForStable` | No specific text to match; just need rendering to finish |
+| Wait for specific text to appear | `waitForText` / `waitUntil` | You know what the TUI should display |
+| Assert text is present right now | `expectVisible` | Viewport already settled, just check |
+| Never | `threadDelay` / fixed sleep | Flaky by design |
 
 ## Viewing snapshots — prefer PNG
 
@@ -32,35 +53,13 @@ Only fall back to `render-text` or `currentView` text when you need to
 do programmatic string matching (e.g. searching for a selector or
 extracting a specific value from the viewport).
 
-## What was added for REPL ergonomics
-
-Use these APIs from `TuiSpec`:
-
-- `withTuiSession`:
-  creates an ad-hoc PTY session outside `tasty`
-- `sendLine`:
-  sends text + `Enter`
-- `currentView`:
-  returns current visible viewport text
-- `dumpView`:
-  writes the current screen to `<name>.ansi.txt` + `<name>.meta.json`
-  and can render PNG in one call via server (`format: "png"|"both"`)
-
-Relevant implementation:
-
-- `src/TuiSpec/Runner.hs`
-- `src/TuiSpec/Render.hs`
-
-## Minimal REPL script
-
-Create a Haskell program (for example `scratch/ReplDemo.hs`):
+## Minimal REPL script (Haskell DSL)
 
 ```haskell
 {-# LANGUAGE OverloadedStrings #-}
 
 module Main where
 
-import Control.Concurrent (threadDelay)
 import TuiSpec
 
 main :: IO ()
@@ -73,25 +72,27 @@ main =
             }
         "demo-session"
         $ \tui -> do
-            launch tui (app "sh" ["-lc", "tui-demo"])
+            let wait = waitForStable tui (defaultWaitOptionsFor tui) 300
 
+            launch tui (app "sh" ["-lc", "tui-demo"])
+            wait
             _ <- dumpView tui "00-initial"
 
             press tui (CharKey 'b')
+            wait
             _ <- dumpView tui "01-board"
 
             sendLine tui "/help"
+            wait
             _ <- dumpView tui "02-help"
-
-            view <- currentView tui
-            putStrLn "Current viewport:"
-            putStrLn (take 1000 (show view))
-
-            -- optional short settle pause between interactions
-            threadDelay (150 * 1000)
 
             press tui (CharKey 'q')
 ```
+
+Key points:
+- `waitForStable tui opts 300` — wait until viewport unchanged for 300ms
+- Bind a local `wait` helper so every action is followed by a stability gate
+- No `threadDelay` anywhere
 
 Run it:
 
@@ -149,7 +150,7 @@ cabal run tuispec -- server --artifact-dir artifacts/server
 - Send one JSON-RPC request per line on stdin.
 - Read one JSON-RPC response per line on stdout.
 
-### Example session
+### Example session with waitForStable
 
 Start server:
 
@@ -157,19 +158,22 @@ Start server:
 cabal run tuispec -- server --artifact-dir artifacts/server
 ```
 
-Then send requests like:
+Then send requests:
 
 ```json
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"name":"demo"}}
-{"jsonrpc":"2.0","id":2,"method":"launch","params":{"command":"sh","args":["-lc","printf 'READY\\n'; exec sh"],"env":{"DEMO_MODE":"1","CLAUDECODE":null},"cwd":".","readySelector":{"type":"exact","text":"READY"}}}
+{"jsonrpc":"2.0","id":2,"method":"launch","params":{"command":"sh","args":["-lc","printf 'READY\\n'; exec sh"],"readySelector":{"type":"exact","text":"READY"}}}
 {"jsonrpc":"2.0","id":3,"method":"sendKey","params":{"key":"ArrowDown"}}
-{"jsonrpc":"2.0","id":4,"method":"sendKey","params":{"key":"Enter"}}
-{"jsonrpc":"2.0","id":5,"method":"dumpView","params":{"name":"after-enter","format":"both"}}
-{"jsonrpc":"2.0","id":6,"method":"currentView","params":{"entireRow":1}}
-{"jsonrpc":"2.0","id":7,"method":"recording.start","params":{"path":"artifacts/server/demo.jsonl"}}
-{"jsonrpc":"2.0","id":8,"method":"recording.stop","params":{}}
+{"jsonrpc":"2.0","id":4,"method":"waitForStable","params":{"debounceMs":300}}
+{"jsonrpc":"2.0","id":5,"method":"dumpView","params":{"name":"after-arrow","format":"both"}}
+{"jsonrpc":"2.0","id":6,"method":"sendKey","params":{"key":"Enter"}}
+{"jsonrpc":"2.0","id":7,"method":"waitForStable","params":{"debounceMs":300}}
+{"jsonrpc":"2.0","id":8,"method":"dumpView","params":{"name":"after-enter","format":"both"}}
 {"jsonrpc":"2.0","id":9,"method":"server.shutdown","params":null}
 ```
+
+Notice: every input action is followed by `waitForStable` before dumping the
+view. This replaces fixed sleeps and makes the script reliable across machines.
 
 ### Supported key strings for `sendKey`
 
@@ -233,3 +237,35 @@ For push-based polling alternatives, subscribe to view changes:
 ```json
 {"jsonrpc":"2.0","id":10,"method":"viewSubscribe","params":{"debounceMs":100,"includeText":false}}
 ```
+
+## Common failure modes and troubleshooting
+
+### `waitForStable` times out
+
+- **Cause**: the TUI keeps updating (clock, spinner, streaming output).
+- **Fix**: increase `debounceMs` to tolerate brief pauses in output, or use
+  `waitForText`/`waitUntil` with a specific pattern instead.
+
+### `waitForStable` returns too early
+
+- **Cause**: `debounceMs` is too short — the TUI paused briefly mid-render.
+- **Fix**: increase `debounceMs` (300ms is a good default; 500ms+ for apps
+  with multi-phase rendering).
+
+### Snapshot mismatch after stable wait
+
+- **Cause**: viewport settled on different content than expected (race in app
+  startup, wrong initial state).
+- **Fix**: use `waitForText` with a readiness selector before taking snapshots.
+  Combine: `waitForText` for readiness, then `waitForStable` for full settle.
+
+### Server returns `-32001` (no active session)
+
+- **Cause**: forgot to call `initialize` before other methods.
+- **Fix**: always start with `initialize`, then `launch`.
+
+### App exits immediately
+
+- **Cause**: command fails or exits before the test can interact with it.
+- **Fix**: verify the command works in a regular terminal first. Check `cwd`
+  and `env` params. Use `readySelector` in `launch` to gate on app startup.

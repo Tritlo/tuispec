@@ -45,7 +45,7 @@ import System.Posix.Process (exitImmediately)
 import System.Posix.Signals (Handler (Catch), installHandler, sigHUP)
 import TuiSpec.Render (renderAnsiSnapshotFileWithFont)
 import TuiSpec.Replay (RecordingDirection (DirectionFrame, DirectionFrameDelta, DirectionNotification, DirectionRequest, DirectionResponse), RecordingHandle, ReplaySpeed (ReplayAsFastAsPossible, ReplayRealTime), appendRecordingEvent, closeRecording, computeFrameDelta, openRecording, streamReplayRequests)
-import TuiSpec.Runner (currentView, defaultWaitOptionsFor, dumpView, expectNotVisible, expectSnapshot, expectVisible, killSessionChildrenNow, launch, openSession, press, pressCombo, renderAnsiViewportText, sendLine, serializeAnsiSnapshot, typeText, waitForSelectorWithAmbiguity)
+import TuiSpec.Runner (currentView, defaultWaitOptionsFor, dumpView, expectNotVisible, expectSnapshot, expectVisible, killSessionChildrenNow, launch, openSession, press, pressCombo, renderAnsiViewportText, sendLine, serializeAnsiSnapshot, typeText, waitForSelectorWithAmbiguity, waitForStable)
 import TuiSpec.Types (AmbiguityMode (FailOnAmbiguous, FirstVisibleMatch, LastVisibleMatch), App (..), Key (..), Modifier (Alt, Control, Shift), Rect (Rect), RunOptions (..), Selector (..), SnapshotName (SnapshotName), Tui (..), WaitOptions (..), defaultRunOptions, tuispecVersion)
 
 -- | Configuration for the JSON-RPC server.
@@ -177,6 +177,7 @@ dispatchMethod state methodName paramsValue =
         "expectSnapshot" -> dispatchExpectSnapshot state paramsValue
         "waitForText" -> dispatchWaitForText state paramsValue
         "waitUntil" -> dispatchWaitUntil state paramsValue
+        "waitForStable" -> dispatchWaitForStable state paramsValue
         "diffView" -> dispatchDiffView state paramsValue
         "expectVisible" -> dispatchExpectVisible state paramsValue
         "expectNotVisible" -> dispatchExpectNotVisible state paramsValue
@@ -433,6 +434,19 @@ dispatchWaitUntil state paramsValue =
                     let defaults = defaultWaitOptionsFor tui
                     let mergedWaitOptions = mergeWaitOptions defaults (waitUntilTimeoutMs params) (waitUntilPollIntervalMs params)
                     waitUntilPattern tui mergedWaitOptions (waitUntilPatternValue params)
+                    pure (object ["ok" .= True])
+
+dispatchWaitForStable :: ServerState -> Value -> IO (Either RpcFailure DispatchOutcome)
+dispatchWaitForStable state paramsValue =
+    withActiveSession state $ \active ->
+        case decodeParamsValue paramsValue of
+            Left err -> pure (Left err)
+            Right params ->
+                runMethod $ do
+                    let tui = activeTui active
+                    let defaults = defaultWaitOptionsFor tui
+                    let mergedWaitOptions = mergeWaitOptions defaults (waitStableTimeoutMs params) (waitStablePollIntervalMs params)
+                    waitForStable tui mergedWaitOptions (waitStableDebounceMs params)
                     pure (object ["ok" .= True])
 
 dispatchDiffView :: ServerState -> Value -> IO (Either RpcFailure DispatchOutcome)
@@ -1140,6 +1154,20 @@ instance FromJSON WaitUntilParams where
         withObject "WaitUntilParams" $ \o ->
             WaitUntilParams
                 <$> o .: "pattern"
+                <*> o .:? "timeoutMs"
+                <*> o .:? "pollIntervalMs"
+
+data WaitForStableParams = WaitForStableParams
+    { waitStableDebounceMs :: Int
+    , waitStableTimeoutMs :: Maybe Int
+    , waitStablePollIntervalMs :: Maybe Int
+    }
+
+instance FromJSON WaitForStableParams where
+    parseJSON =
+        withObject "WaitForStableParams" $ \o ->
+            WaitForStableParams
+                <$> o .: "debounceMs"
                 <*> o .:? "timeoutMs"
                 <*> o .:? "pollIntervalMs"
 
