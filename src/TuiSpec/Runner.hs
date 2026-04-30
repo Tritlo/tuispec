@@ -9,22 +9,32 @@ Most users interact with this module through 'tuiTest' and the action/assertion
 functions ('launch', 'press', 'waitForText', 'expectSnapshot', ...).
 -}
 module TuiSpec.Runner (
+    artifactFile,
+    artifactRoot,
     closeSession,
     currentView,
+    dumpFailureBundle,
     dumpView,
     expectNotVisible,
     expectSnapshot,
     expectVisible,
     launch,
+    launchAndWait,
+    launchAndWaitWith,
+    loadEnvFile,
     openSession,
     press,
     pressCombo,
+    prependPathEntry,
     renderAnsiViewportText,
     sendLine,
     serializeAnsiSnapshot,
     step,
     tuiTest,
     typeText,
+    withFailureBundle,
+    writeArtifactFile,
+    writeRecording,
     killSessionChildrenNow,
     waitForSelector,
     waitForSelectorWithAmbiguity,
@@ -36,13 +46,14 @@ module TuiSpec.Runner (
 ) where
 
 import Control.Concurrent (threadDelay)
-import Control.Exception (Exception, SomeException, displayException, finally, throwIO, toException, try)
-import Control.Monad (unless, when)
+import Control.Exception (Exception, SomeException, displayException, finally, fromException, throwIO, toException, try)
+import Control.Monad (forM_, unless, when)
 import Data.Aeson (encode, object, (.=))
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
 import Data.Char (chr, ord, toLower)
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
+import Data.Int (Int64)
 import Data.IntMap.Strict qualified as IM
 import Data.List (intercalate, nub, sort)
 import Data.Maybe (fromMaybe, isJust)
@@ -52,21 +63,34 @@ import Data.Text.Encoding qualified as TE
 import Data.Text.Encoding.Error qualified as TEE
 import Data.Text.IO qualified as TIO
 import Data.Time.Clock (NominalDiffTime, UTCTime, diffUTCTime, getCurrentTime)
+import Foreign.C.Error (throwErrnoIfMinus1_)
+import Foreign.C.Types (CInt (..))
 import System.Directory (canonicalizePath, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, removePathForcibly)
-import System.Environment (getEnvironment, lookupEnv)
-import System.FilePath (isRelative, makeRelative, (</>))
-import System.Posix.Process (getProcessGroupIDOf)
+import System.Environment (getEnvironment, lookupEnv, setEnv)
+import System.Exit (ExitCode (..), exitWith)
+import System.FilePath (isRelative, makeRelative, searchPathSeparator, splitSearchPath, takeDirectory, (</>))
+import System.IO (hPutStrLn, stderr)
+import System.Posix.Directory (changeWorkingDirectory)
+import System.Posix.Env qualified as PosixEnv
+import System.Posix.IO (OpenMode (ReadWrite), closeFd, defaultFileFlags, dupTo, openFd, stdError, stdInput, stdOutput)
+import System.Posix.Process (createSession, exitImmediately, forkProcess, getProcessGroupIDOf)
 import System.Posix.Pty qualified as Pty
 import System.Posix.Signals (sigKILL, signalProcess, signalProcessGroup)
-import System.Posix.Types (ProcessGroupID)
+import System.Posix.Terminal (getSlaveTerminalName, openPseudoTerminal)
+import System.Posix.Types (Fd (..), ProcessGroupID)
 import System.Process (ProcessHandle, getPid, getProcessExitCode, terminateProcess)
+import System.Process.Internals (mkProcessHandle)
 import System.Timeout (timeout)
 import Test.Tasty (TestTree)
 import Test.Tasty.HUnit (assertFailure, testCase)
 import Text.Read (readMaybe)
 import TuiSpec.Internal (cleanPattern, ignoreIOError, regexLikeMatch, resolveAutoSnapshotTheme, safeFileStem, safeIndex, snapshotMetadataPath, wildcardContains)
 import TuiSpec.ProjectRoot (resolveProjectRoot)
+import TuiSpec.Replay (RecordingDirection (DirectionFrame), RecordingEvent (..))
 import TuiSpec.Types
+
+foreign import ccall unsafe "tuispec_enable_packet_mode"
+    c_tuispec_enable_packet_mode :: Fd -> IO CInt
 
 data TestStatus
     = Passed
@@ -164,23 +188,39 @@ If an app is already running for the test, it is terminated first.
 -}
 launch :: Tui -> App -> IO ()
 launch tui appSpec = do
-    appendAction tui ("launch " <> T.pack (command appSpec))
+    appendAction tui ("launch " <> appLabel appSpec)
     currentPty <- readPty tui
     case currentPty of
         Just ptyHandle ->
             terminatePtyHandle ptyHandle
         Nothing -> pure ()
     writePty tui Nothing
-    maybePty <- initializePty (terminalRows (tuiOptions tui)) (terminalCols (tuiOptions tui)) appSpec
-    case maybePty of
-        Just ptyHandle -> do
+    ptyResult <- initializePty (terminalRows (tuiOptions tui)) (terminalCols (tuiOptions tui)) appSpec
+    case ptyResult of
+        Right ptyHandle -> do
             writePty tui (Just ptyHandle)
             modifyState tui $ \state -> state{launchedApp = Just appSpec}
             threadDelay settleDelayMicros
             _ <- syncVisibleBuffer tui
             pure ()
-        Nothing ->
-            throwIO (AssertionError "PTY backend unavailable during launch")
+        Left err ->
+            throwIO
+                ( AssertionError
+                    ( "PTY backend unavailable during launch: "
+                        <> displayException err
+                    )
+                )
+
+-- | Launch an application and wait for a ready selector using test defaults.
+launchAndWait :: Tui -> App -> Selector -> IO ()
+launchAndWait tui appSpec readySelector =
+    launchAndWaitWith tui (defaultWaitOptionsFor tui) appSpec readySelector
+
+-- | Launch an application and wait for a ready selector with explicit wait options.
+launchAndWaitWith :: Tui -> WaitOptions -> App -> Selector -> IO ()
+launchAndWaitWith tui waitOptions appSpec readySelector = do
+    launch tui appSpec
+    waitForSelector tui waitOptions readySelector
 
 -- | Send a single key press to the PTY application.
 press :: Tui -> Key -> IO ()
@@ -241,6 +281,52 @@ sendLine :: Tui -> Text -> IO ()
 sendLine tui line = do
     typeText tui line
     press tui Enter
+
+-- | Load simple @KEY=value@ entries from an env file into the current process.
+loadEnvFile :: FilePath -> IO ()
+loadEnvFile path = do
+    exists <- doesFileExist path
+    when exists $ do
+        contents <- TIO.readFile path
+        forM_ (T.lines contents) loadLine
+  where
+    loadLine rawLine = do
+        let trimmed = T.strip rawLine
+        when (not (T.null trimmed) && not ("#" `T.isPrefixOf` trimmed)) $ do
+            let assignment = T.strip $ fromMaybe trimmed (T.stripPrefix "export " trimmed)
+            case T.breakOn "=" assignment of
+                (key, valueWithEquals)
+                    | not (T.null key) && "=" `T.isPrefixOf` valueWithEquals -> do
+                        let keyText = T.strip key
+                        let keyString = T.unpack keyText
+                        oldValue <- fromMaybe "" <$> lookupEnv keyString
+                        let rawValue = stripEnvQuotes (T.drop 1 valueWithEquals)
+                        setEnv keyString (T.unpack (expandEnvSelfReference keyText (T.pack oldValue) rawValue))
+                _ -> pure ()
+
+stripEnvQuotes :: Text -> Text
+stripEnvQuotes value =
+    if T.length stripped >= 2
+        then case (T.head stripped, T.last stripped) of
+            ('"', '"') -> T.init (T.tail stripped)
+            ('\'', '\'') -> T.init (T.tail stripped)
+            _ -> stripped
+        else stripped
+  where
+    stripped = T.strip value
+
+expandEnvSelfReference :: Text -> Text -> Text -> Text
+expandEnvSelfReference key oldValue =
+    T.replace ("$" <> key) oldValue
+        . T.replace ("${" <> key <> "}") oldValue
+
+-- | Prepend a directory to @PATH@ unless it is already present.
+prependPathEntry :: FilePath -> IO ()
+prependPathEntry dir = do
+    oldPath <- fromMaybe "" <$> lookupEnv "PATH"
+    let entries = splitSearchPath oldPath
+    unless (dir `elem` entries) $
+        setEnv "PATH" (intercalate [searchPathSeparator] (dir : filter (not . null) entries))
 
 -- | Return the current visible viewport text.
 currentView :: Tui -> IO Text
@@ -303,6 +389,7 @@ waitFor tui waitOptions predicate = do
         if predicate viewport
             then pure ()
             else do
+                failIfLaunchedProcessExited tui "waitFor"
                 now <- getCurrentTime
                 if diffUTCTime now startedAt >= timeoutLimit
                     then throwIO (AssertionError "waitFor timed out")
@@ -337,7 +424,9 @@ waitForStable tui waitOptions debounceMs = do
                 let changedAt = if currentText /= lastView then now else lastChangedAt
                 if diffUTCTime now changedAt >= debounceLimit
                     then pure ()
-                    else loop startedAt currentText changedAt
+                    else do
+                        failIfLaunchedProcessExited tui "waitForStable"
+                        loop startedAt currentText changedAt
 
 {- | Capture and compare the current PTY screen against a named snapshot.
 
@@ -404,6 +493,106 @@ dumpView tui snapshotName = do
     (_stem, _ansi, ansiPath) <- captureSnapshotToDir tui (tuiTestRoot tui </> "snapshots") snapshotName
     pure ansiPath
 
+-- | Per-test artifact directory for logs and other auxiliary files.
+artifactRoot :: Tui -> FilePath
+artifactRoot = tuiTestRoot
+
+-- | Resolve a relative path underneath the per-test artifact directory.
+artifactFile :: Tui -> FilePath -> FilePath
+artifactFile tui path =
+    if isRelative path
+        then artifactRoot tui </> path
+        else path
+
+-- | Write a UTF-8 text artifact and return its absolute path.
+writeArtifactFile :: Tui -> FilePath -> Text -> IO FilePath
+writeArtifactFile tui path textValue = do
+    let fullPath = artifactFile tui path
+    createDirectoryIfMissing True (takeDirectory fullPath)
+    TIO.writeFile fullPath textValue
+    pure fullPath
+
+-- | Persist the current frame log as a JSONL recording compatible with replay.
+writeRecording :: Tui -> FilePath -> IO FilePath
+writeRecording tui path = do
+    state <- readIORef (tuiStateRef tui)
+    let fullPath = artifactFile tui path
+    createDirectoryIfMissing True (takeDirectory fullPath)
+    BL.writeFile fullPath (BL.concat (map ((<> "\n") . encodeFrame) (zip [0 ..] (frameLog state))))
+    pure fullPath
+  where
+    encodeFrame :: (Int64, Text) -> BL.ByteString
+    encodeFrame (index, frameText) =
+        encode
+            RecordingEvent
+                { recordingTimestampMicros = index * 100000
+                , recordingDirection = DirectionFrame
+                , recordingLine = frameText
+                }
+
+-- | Dump a diagnostic bundle for the current TUI state and return its path.
+dumpFailureBundle :: Tui -> SnapshotName -> IO FilePath
+dumpFailureBundle tui bundleName = do
+    let bundleStem = safeFileStem (T.unpack (unSnapshotName bundleName))
+    snapshotResult <- try (dumpView tui bundleName) :: IO (Either SomeException FilePath)
+    viewResult <- try (currentView tui) :: IO (Either SomeException Text)
+    exitResult <- launchedExitStatus tui
+    state <- readIORef (tuiStateRef tui)
+    writeArtifactFile
+        tui
+        ("failure-bundles" </> bundleStem <> ".txt")
+        (renderFailureBundle state snapshotResult viewResult exitResult)
+
+-- | Add a failure bundle when an action throws, then rethrow the original error.
+withFailureBundle :: Tui -> SnapshotName -> IO a -> IO a
+withFailureBundle tui bundleName action = do
+    result <- try action
+    case result of
+        Right value -> pure value
+        Left (err :: SomeException) -> do
+            _ <- try (dumpFailureBundle tui bundleName) :: IO (Either SomeException FilePath)
+            throwIO err
+
+renderFailureBundle ::
+    TuiState ->
+    Either SomeException FilePath ->
+    Either SomeException Text ->
+    Maybe ExitCode ->
+    Text
+renderFailureBundle state snapshotResult viewResult exitResult =
+    T.unlines
+        [ "tuispec failure bundle"
+        , ""
+        , "Launched app: " <> T.pack (show (launchedApp state))
+        , "Process exit: " <> maybe "(still running or no app)" (T.pack . show) exitResult
+        , "Snapshot: " <> renderSnapshotResult snapshotResult
+        , ""
+        , "Actions:"
+        , renderList (actionLog state)
+        , ""
+        , "Warnings:"
+        , renderList (runtimeWarnings state)
+        , ""
+        , "Snapshot artifacts:"
+        , renderList (snapshotLog state)
+        , ""
+        , "Viewport:"
+        , renderViewResult viewResult
+        ]
+  where
+    renderSnapshotResult =
+        either
+            (("failed: " <>) . T.pack . displayException)
+            T.pack
+
+    renderViewResult =
+        either
+            (("failed: " <>) . T.pack . displayException)
+            id
+
+    renderList [] = "  (none)"
+    renderList values = T.unlines (map ("  - " <>) values)
+
 {- | Canonicalize ANSI text into a theme-aware JSON framebuffer.
 
 This representation is used for deterministic snapshot comparison and PNG
@@ -455,6 +644,7 @@ executeWithRetries projectRoot options specDef testRoot snapshotRoot = go 1
 
     go attempt = do
         resetDirectory testRoot
+        createDirectoryIfMissing True testRoot
         tui <- mkTui projectRoot options (specName specDef) testRoot snapshotRoot attempt
         runResultAndState <-
             ( do
@@ -472,7 +662,17 @@ executeWithRetries projectRoot options specDef testRoot snapshotRoot = go 1
                                         )
                                     )
                             Just resultValue -> resultValue
-                _ <- timeout (500 * 1000) (syncVisibleBuffer tui)
+                case runResult of
+                    Left (_ :: SomeException) -> do
+                        _ <- try (dumpFailureBundle tui "failure") :: IO (Either SomeException FilePath)
+                        pure ()
+                    Right () -> pure ()
+                activePty <- readPty tui
+                case activePty of
+                    Just _ -> do
+                        _ <- timeout (500 * 1000) (syncVisibleBuffer tui)
+                        pure ()
+                    Nothing -> pure ()
                 state <- readIORef (tuiStateRef tui)
                 pure (runResult, state)
             )
@@ -511,15 +711,20 @@ mkTui projectRoot options name testRoot snapshotRoot _attempt = do
                 }
     pure tui
 
-initializePty :: Int -> Int -> App -> IO (Maybe PtyHandle)
-initializePty rows cols appSpec = do
-    result <- try (startPty rows cols appSpec) :: IO (Either SomeException PtyHandle)
-    case result of
-        Left _ -> pure Nothing
-        Right handle -> pure (Just handle)
+initializePty :: Int -> Int -> App -> IO (Either SomeException PtyHandle)
+initializePty rows cols appSpec =
+    try (startPty rows cols appSpec)
 
 startPty :: Int -> Int -> App -> IO PtyHandle
 startPty rows cols appSpec = do
+    case appSpec of
+        App{} ->
+            startCommandPty rows cols appSpec
+        HaskellApp{} ->
+            startHaskellPty rows cols appSpec
+
+startCommandPty :: Int -> Int -> App -> IO PtyHandle
+startCommandPty rows cols appSpec = do
     processEnv <- withTerminalEnv (env appSpec)
     let (effectiveCommand, effectiveArgs) = wrapLaunchWithCwd appSpec
     (master, processHandle) <-
@@ -534,6 +739,69 @@ startPty rows cols appSpec = do
             { ptyMaster = master
             , ptyProcess = processHandle
             }
+
+startHaskellPty :: Int -> Int -> App -> IO PtyHandle
+startHaskellPty rows cols appSpec@HaskellApp{} = do
+    processEnv <- withTerminalEnv (env appSpec)
+    (masterFd, initialSlaveFd) <- openPseudoTerminal
+    enablePacketMode masterFd
+    maybeMaster <- Pty.createPty masterFd
+    master <-
+        case maybeMaster of
+            Just pty -> pure pty
+            Nothing -> throwIO (AssertionError "opened PTY master is not a terminal")
+    Pty.resizePty master (cols, rows)
+    slaveName <- getSlaveTerminalName masterFd
+    processId <-
+        forkProcess
+            ( runHaskellPtyChild
+                processEnv
+                initialSlaveFd
+                masterFd
+                slaveName
+                (cwd appSpec)
+                (appAction appSpec)
+            )
+    ignoreIOError (closeFd initialSlaveFd)
+    processHandle <- mkProcessHandle (fromIntegral processId) True
+    pure
+        PtyHandle
+            { ptyMaster = master
+            , ptyProcess = processHandle
+            }
+startHaskellPty _ _ App{} =
+    throwIO (AssertionError "internal error: startHaskellPty called for command app")
+
+runHaskellPtyChild :: [(String, String)] -> Fd -> Fd -> FilePath -> Maybe FilePath -> IO () -> IO ()
+runHaskellPtyChild processEnv initialSlaveFd masterFd slaveName maybeCwd action = do
+    result <- try childMain
+    case result of
+        Right () ->
+            exitWith ExitSuccess
+        Left (err :: SomeException)
+            | Just exitCode <- fromException err ->
+                exitWith exitCode
+            | otherwise -> do
+                hPutStrLn stderr ("tuispec Haskell app failed: " <> displayException err)
+                exitImmediately (ExitFailure 1)
+  where
+    childMain = do
+        ignoreIOError (closeFd masterFd)
+        ignoreIOError (closeFd initialSlaveFd)
+        _ <- createSession
+        slaveFd <- openFd slaveName ReadWrite defaultFileFlags
+        _ <- dupTo slaveFd stdInput
+        _ <- dupTo slaveFd stdOutput
+        _ <- dupTo slaveFd stdError
+        unless (slaveFd `elem` [stdInput, stdOutput, stdError]) $
+            ignoreIOError (closeFd slaveFd)
+        PosixEnv.setEnvironment processEnv
+        maybe (pure ()) changeWorkingDirectory maybeCwd
+        action
+
+enablePacketMode :: Fd -> IO ()
+enablePacketMode fd =
+    throwErrnoIfMinus1_ "failed to enable PTY packet mode" (c_tuispec_enable_packet_mode fd)
 
 withTerminalEnv :: Maybe [(String, Maybe String)] -> IO [(String, String)]
 withTerminalEnv envOverrides = do
@@ -580,6 +848,12 @@ shellQuote value =
   where
     escapeChar '\'' = "'\\''"
     escapeChar c = [c]
+
+appLabel :: App -> Text
+appLabel appSpec =
+    case appSpec of
+        App{command} -> T.pack command
+        HaskellApp{appName} -> T.pack appName
 
 teardownTui :: Tui -> IO ()
 teardownTui tui =
@@ -636,6 +910,28 @@ readPty tui = readIORef (tuiPty tui)
 
 writePty :: Tui -> Maybe PtyHandle -> IO ()
 writePty tui value = writeIORef (tuiPty tui) value
+
+failIfLaunchedProcessExited :: Tui -> String -> IO ()
+failIfLaunchedProcessExited tui context = do
+    exitStatus <- launchedExitStatus tui
+    case exitStatus of
+        Nothing -> pure ()
+        Just exitCode ->
+            throwIO
+                ( AssertionError
+                    ( "launched app exited during "
+                        <> context
+                        <> ": "
+                        <> show exitCode
+                    )
+                )
+
+launchedExitStatus :: Tui -> IO (Maybe ExitCode)
+launchedExitStatus tui = do
+    maybePty <- readPty tui
+    case maybePty of
+        Nothing -> pure Nothing
+        Just ptyHandle -> getProcessExitCode (ptyProcess ptyHandle)
 
 currentViewport :: Tui -> IO Viewport
 currentViewport tui = do

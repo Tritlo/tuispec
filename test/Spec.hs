@@ -2,7 +2,8 @@
 
 module Main where
 
-import Control.Exception (SomeException, bracket, catch)
+import Control.Concurrent (threadDelay)
+import Control.Exception (SomeException, bracket, catch, try)
 import Data.Aeson (Value (..), decodeStrict', encode, object, (.=))
 import Data.Aeson.Key qualified as K
 import Data.Aeson.KeyMap qualified as KM
@@ -13,11 +14,12 @@ import Data.Scientific (toBoundedInteger)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
-import System.Directory (canonicalizePath, createDirectoryIfMissing, doesFileExist)
-import System.Environment (getEnvironment)
+import System.Directory (canonicalizePath, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getCurrentDirectory)
+import System.Environment (getEnvironment, lookupEnv, setEnv)
 import System.Exit (ExitCode (ExitSuccess))
 import System.FilePath ((</>))
-import System.IO (BufferMode (LineBuffering), Handle, hClose, hFlush, hSetBuffering)
+import System.IO (BufferMode (LineBuffering), Handle, hClose, hFlush, hPutStrLn, hSetBuffering, stderr)
+import System.Process (readProcessWithExitCode)
 import System.Process qualified as Process
 import System.Timeout (timeout)
 import Test.Tasty (defaultMain, testGroup)
@@ -43,6 +45,85 @@ main =
                     expectNotVisible tui (Exact "this text should not exist")
                     expectSnapshot tui "smoke-viewport"
                     sendLine tui "exit"
+            , tuiTest
+                defaultRunOptions
+                    { timeoutSeconds = 8
+                    , artifactsDir = "artifacts/artifact-root-smoke"
+                    }
+                "smoke: artifact root exists before body"
+                $ \tui -> do
+                    exists <- doesDirectoryExist (artifactRoot tui)
+                    assertBool ("artifact root does not exist: " <> artifactRoot tui) exists
+            , testCase "smoke: launchAndWait and artifact helpers" $
+                withTuiSession
+                    defaultRunOptions
+                        { timeoutSeconds = 8
+                        , artifactsDir = "artifacts/repl-helpers-smoke"
+                        }
+                    "helpers-session"
+                    ( \tui -> do
+                        launchAndWait tui (app "sh" ["-lc", "printf 'READY\\n'; sleep 2"]) (Exact "READY")
+                        artifactPath <- writeArtifactFile tui "notes/helper.txt" "hello artifact"
+                        artifactPath @?= artifactFile tui "notes/helper.txt"
+                        exists <- doesFileExist artifactPath
+                        assertBool "writeArtifactFile should create the artifact" exists
+                    )
+            , testCase "smoke: env file loading expands self references" $
+                withTuiSession
+                    defaultRunOptions
+                        { timeoutSeconds = 8
+                        , artifactsDir = "artifacts/repl-env-file-smoke"
+                        }
+                    "env-file-session"
+                    ( \tui -> do
+                        setEnv "TUISPEC_ENV_FILE_VALUE" "base"
+                        let envPath = artifactFile tui "test.env"
+                        writeFile envPath "export TUISPEC_ENV_FILE_VALUE=\"prefix:$TUISPEC_ENV_FILE_VALUE\"\n"
+                        loadEnvFile envPath
+                        value <- lookupEnv "TUISPEC_ENV_FILE_VALUE"
+                        value @?= Just "prefix:base"
+                    )
+            , testCase "smoke: trySelectNumberedChoice selects numbered choice" $
+                withTuiSession
+                    defaultRunOptions
+                        { timeoutSeconds = 8
+                        , artifactsDir = "artifacts/repl-menu-smoke"
+                        }
+                    "menu-session"
+                    ( \tui -> do
+                        launch
+                            tui
+                            ( app
+                                "sh"
+                                [ "-lc"
+                                , "stty -icanon min 1 time 0; printf 'SELECT LANGUAGE\\n > 1) Go\\n   2) Python\\n'; key=$(dd bs=1 count=1 2>/dev/null); printf '\\npicked:%s\\n' \"$key\"; sleep 1"
+                                ]
+                            )
+                        selected <- trySelectNumberedChoiceWith tui defaultWaitOptions{timeoutMs = 2000} "SELECT LANGUAGE" "Python"
+                        assertBool "trySelectNumberedChoice should find the Python choice" selected
+                        waitForText tui (Exact "picked:2")
+                    )
+            , testCase "smoke: failure bundle and recording helpers" $
+                withTuiSession
+                    defaultRunOptions
+                        { timeoutSeconds = 8
+                        , artifactsDir = "artifacts/repl-diagnostics-smoke"
+                        }
+                    "diagnostics-session"
+                    ( \tui -> do
+                        launchAndWait tui (app "sh" ["-lc", "printf 'READY\\n'; sleep 2"]) (Exact "READY")
+                        result <- try (withFailureBundle tui "manual-failure" (assertFailure "boom")) :: IO (Either SomeException ())
+                        case result of
+                            Left _ -> pure ()
+                            Right () -> assertFailure "withFailureBundle should rethrow the wrapped assertion"
+                        bundleExists <- doesFileExist (artifactFile tui ("failure-bundles" </> "manual-failure.txt"))
+                        assertBool "withFailureBundle should write a diagnostic bundle" bundleExists
+                        recordingPath <- writeRecording tui "recordings/session.jsonl"
+                        recordingExists <- doesFileExist recordingPath
+                        assertBool "writeRecording should write JSONL output" recordingExists
+                        recordingText <- readFile recordingPath
+                        assertBool "recording should contain frame events" ("\"direction\":\"frame\"" `isInfixOf` recordingText)
+                    )
             , testCase "smoke: repl session can dump view" $ do
                 snapshotPath <-
                     withTuiSession
@@ -78,6 +159,71 @@ main =
                         sendLine tui "printf '%s\\n' \"$TUISPEC_TEST_ENV\""
                         waitForText tui (Exact "hello-env")
                         sendLine tui "exit"
+                    )
+            , testCase "smoke: launches Haskell action under PTY" $
+                withTuiSession
+                    defaultRunOptions
+                        { timeoutSeconds = 8
+                        , artifactsDir = "artifacts/repl-haskell-smoke"
+                        }
+                    "haskell-session"
+                    ( \tui -> do
+                        let markerPath = artifactRoot tui </> "haskell-started"
+                        launch
+                            tui
+                            ( haskellApp "haskell-hello" $ do
+                                writeFile markerPath "started"
+                                hPutStrLn stderr "hello from Haskell app"
+                                threadDelay (2 * 1000 * 1000)
+                            )
+                        markerExists <- waitForFile markerPath
+                        assertBool "Haskell action did not write startup marker" markerExists
+                        waitForText tui (Exact "hello from Haskell app")
+                    )
+            , testCase "smoke: Haskell action can run subprocesses" $
+                withTuiSession
+                    defaultRunOptions
+                        { timeoutSeconds = 8
+                        , artifactsDir = "artifacts/repl-haskell-process-smoke"
+                        }
+                    "haskell-process-session"
+                    ( \tui -> do
+                        launch
+                            tui
+                            ( haskellApp "haskell-process" $ do
+                                (exitCode, stdoutText, _stderrText) <-
+                                    readProcessWithExitCode "sh" ["-c", "printf subprocess-ok"] ""
+                                hPutStrLn stderr "before subprocess"
+                                hPutStrLn stderr (show exitCode)
+                                hPutStrLn stderr stdoutText
+                                threadDelay (2 * 1000 * 1000)
+                            )
+                        waitForText tui (Exact "before subprocess")
+                        waitForText tui (Exact "ExitSuccess")
+                        waitForText tui (Exact "subprocess-ok")
+                    )
+            , testCase "smoke: Haskell action honors cwd and env" $
+                withTuiSession
+                    defaultRunOptions
+                        { timeoutSeconds = 8
+                        , artifactsDir = "artifacts/repl-haskell-cwd-env-smoke"
+                        }
+                    "haskell-cwd-env-session"
+                    ( \tui -> do
+                        launch
+                            tui
+                            ( haskellApp "haskell-cwd-env" $ do
+                                cwd <- getCurrentDirectory
+                                envValue <- lookupEnv "TUISPEC_TEST_ENV"
+                                hPutStrLn stderr cwd
+                                hPutStrLn stderr (show envValue)
+                                threadDelay (2 * 1000 * 1000)
+                            )
+                                { cwd = Just "/tmp"
+                                , env = Just [("TUISPEC_TEST_ENV", Just "hello-env")]
+                                }
+                        waitForText tui (Exact "/tmp")
+                        waitForText tui (Exact "Just \"hello-env\"")
                     )
             , testCase "smoke: waitForText ignores ANSI escape sequences" $
                 withTuiSession
@@ -544,6 +690,18 @@ exactSelector textValue =
 
 renderValue :: Value -> Text
 renderValue = TE.decodeUtf8 . BL.toStrict . encode
+
+waitForFile :: FilePath -> IO Bool
+waitForFile path = go (20 :: Int)
+  where
+    go 0 = doesFileExist path
+    go remaining = do
+        exists <- doesFileExist path
+        if exists
+            then pure True
+            else do
+                threadDelay (50 * 1000)
+                go (remaining - 1)
 
 locateTuiSpecExecutable :: IO FilePath
 locateTuiSpecExecutable = do

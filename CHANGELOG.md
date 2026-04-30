@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.0.0 — 2026-04-30
+
+* Add `haskellApp` for launching a Haskell `IO ()` action under a PTY without a separate target executable.
+* Expose `artifactRoot` to let tests locate the per-test directory for logs and auxiliary files.
+* Add Haskell DSL helpers for ready-gated launches (`launchAndWait`), artifact paths/writes, env-file loading, PATH prepending, numbered choice selection, manual failure bundles, and JSONL recording export.
+* Add `TuiSpec.Choice` for parsing and selecting numbered choices without tying the API to a modal or menu widget.
+* Automatically write a diagnostic failure bundle for failed Haskell DSL tests.
+* Surface the underlying exception when PTY launch fails instead of reporting a generic "backend unavailable" error.
+* Fail waits when the launched app exits before the selector or stability condition is reached.
+* Skip the post-test viewport sync when no PTY is active, avoiding spurious work after a failed launch.
+
 ## 0.2.0.0 — 2026-02-24
 
 * Add `waitForStable` primitive (DSL + JSON-RPC) to replace fixed sleeps with debounce-based viewport stability checks.

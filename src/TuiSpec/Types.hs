@@ -10,6 +10,7 @@ module TuiSpec.Types (
     AmbiguityMode (..),
     App (..),
     app,
+    haskellApp,
     Key (..),
     Modifier (..),
     PtyHandle (..),
@@ -51,13 +52,27 @@ data Spec = Spec
 
 `cwd` sets the working directory for the launch command when present.
 -}
-data App = App
-    { command :: FilePath
-    , args :: [String]
-    , env :: Maybe [(String, Maybe String)]
-    , cwd :: Maybe FilePath
-    }
-    deriving (Eq, Show)
+data App
+    = App
+        { command :: FilePath
+        , args :: [String]
+        , env :: Maybe [(String, Maybe String)]
+        , cwd :: Maybe FilePath
+        }
+    | HaskellApp
+        { appName :: String
+        , appAction :: IO ()
+        , env :: Maybe [(String, Maybe String)]
+        , cwd :: Maybe FilePath
+        }
+
+instance Show App where
+    show appSpec =
+        case appSpec of
+            App{command, args} ->
+                "App " <> show (command : args)
+            HaskellApp{appName} ->
+                "HaskellApp " <> show appName
 
 {- | Construct an app launch request using inherited environment variables and
 the current working directory.
@@ -67,6 +82,21 @@ app commandValue argsValue =
     App
         { command = commandValue
         , args = argsValue
+        , env = Nothing
+        , cwd = Nothing
+        }
+
+{- | Construct a launch request from a Haskell action.
+
+The action runs in a forked child process connected to the test PTY. This keeps
+the same terminal behavior as command launches without requiring a separate
+target executable path.
+-}
+haskellApp :: String -> IO () -> App
+haskellApp name action =
+    HaskellApp
+        { appName = name
+        , appAction = action
         , env = Nothing
         , cwd = Nothing
         }
@@ -120,7 +150,7 @@ defaultRunOptions =
 
 -- | The tuispec library/protocol version.
 tuispecVersion :: String
-tuispecVersion = "0.2.0.0"
+tuispecVersion = "0.3.0.0"
 
 -- | Key modifiers for combo key presses.
 data Modifier

@@ -28,10 +28,23 @@ module TuiSpec (
 
     -- * Actions
     launch,
+    launchAndWait,
+    launchAndWaitWith,
     press,
     pressCombo,
     typeText,
     sendLine,
+    loadEnvFile,
+    prependPathEntry,
+
+    -- * Numbered choices
+    selectNumberedChoice,
+    selectNumberedChoiceWith,
+    trySelectNumberedChoice,
+    trySelectNumberedChoiceWith,
+    parseNumberedChoices,
+    NumberedChoice (..),
+    ChoiceSelectionError (..),
 
     -- * Waits and assertions
     waitFor,
@@ -44,6 +57,12 @@ module TuiSpec (
     -- * Snapshots
     expectSnapshot,
     dumpView,
+    artifactRoot,
+    artifactFile,
+    writeArtifactFile,
+    dumpFailureBundle,
+    withFailureBundle,
+    writeRecording,
     currentView,
 
     -- * Steps
@@ -60,6 +79,7 @@ module TuiSpec (
     defaultWaitOptionsFor,
     App (..),
     app,
+    haskellApp,
     Key (..),
     Modifier (..),
     Selector (..),
@@ -75,6 +95,7 @@ module TuiSpec (
     Tui,
 ) where
 
+import TuiSpec.Choice
 import TuiSpec.Render (renderAnsiSnapshotTextFile)
 import TuiSpec.Runner
 import TuiSpec.Types
