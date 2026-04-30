@@ -64,6 +64,7 @@ module TuiSpec (
     withFailureBundle,
     writeRecording,
     currentView,
+    currentViewRect,
 
     -- * Steps
     step,

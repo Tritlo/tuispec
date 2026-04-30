@@ -2,10 +2,18 @@
 
 ## 0.3.0.0 — 2026-04-30
 
+* **Breaking:** the `App` type is now a sum (`App` | `HaskellApp`) so it no longer derives `Eq`. The `Show` instance is kept (now hand-written). `command`, `args`, `appName`, and `appAction` accessors are partial — pattern match on the constructor when both shapes are possible.
+
 * Add `haskellApp` for launching a Haskell `IO ()` action under a PTY without a separate target executable.
 * Expose `artifactRoot` to let tests locate the per-test directory for logs and auxiliary files.
 * Add Haskell DSL helpers for ready-gated launches (`launchAndWait`), artifact paths/writes, env-file loading, PATH prepending, numbered choice selection, manual failure bundles, and JSONL recording export.
 * Add `TuiSpec.Choice` for parsing and selecting numbered choices without tying the API to a modal or menu widget.
+* Add `currentViewRect` for retrieving viewport text cropped to a `Rect`.
+* Locate the built `tuispec` executable in both `dist-newstyle` and `dist` build trees, and honor a `TUISPEC_EXECUTABLE` override, so the test suite works under `Setup.hs`/`v1-build` (#1).
+* Surface "launched app exited" failures from `press`, `pressCombo`, and `typeText` instead of writing into a closed PTY.
+* Parse numbered choice labels correctly when the line contains a trailing border (e.g. `> 1) Haskell │ Modern` now yields `Haskell`, not `Haskell Modern`).
+* Switch internal logs (actions, frames, warnings, snapshot artifacts) to amortised-O(1) prepend storage; the `actionLog`/`frameLog`/`snapshotLog`/`runtimeWarnings` fields of `TuiState` are now newest-first (reverse before display).
+* Add `recordTraceTo :: Maybe FilePath` to `RunOptions`. When set, the runner writes a JSONL trace recording with real wall-clock timestamps to that path under each test's artifact directory; replay with `tuispec replay PATH`. **Breaking:** `frameLog` is now `[(Int64, Text)]` (microseconds-since-session-start, frame text), not `[Text]`, and `Tui` gained a `tuiSessionStart :: UTCTime` field.
 * Automatically write a diagnostic failure bundle for failed Haskell DSL tests.
 * Surface the underlying exception when PTY launch fails instead of reporting a generic "backend unavailable" error.
 * Fail waits when the launched app exits before the selector or stability condition is reached.

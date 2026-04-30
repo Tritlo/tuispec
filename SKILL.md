@@ -94,6 +94,37 @@ Key points:
 - Bind a local `wait` helper so every action is followed by a stability gate
 - No `threadDelay` anywhere
 
+## Other DSL helpers (0.3+)
+
+Beyond the minimal example, the library exposes:
+
+- `launchAndWait tui appSpec readySelector` — launch and wait for a ready
+  selector in one call (uses session defaults; see `launchAndWaitWith` for
+  explicit `WaitOptions`).
+- `haskellApp name action` — launch an inline `IO ()` Haskell action under a
+  PTY without needing a separate target executable. Honors `cwd` and `env`
+  the same way as `app`.
+- `loadEnvFile path`, `prependPathEntry dir` — env-file loading (with
+  `$VAR` self-reference expansion) and PATH prepending for the test process.
+- `selectNumberedChoice tui prompt choice` (and `trySelect…` /
+  `…With WaitOptions`) — select numbered options like `1) Haskell` after a
+  prompt appears, falling back to arrow-key navigation if a digit press is
+  ignored. Throws `ChoiceSelectionError` on failure.
+- `artifactRoot tui`, `artifactFile tui rel`, `writeArtifactFile tui rel txt`
+  — locate and write into the per-test artifact directory.
+- `currentViewRect tui rect` — return the viewport text cropped to a region.
+- `dumpFailureBundle` / `withFailureBundle` — capture diagnostic state on
+  failure (snapshot + viewport + action log + warnings + exit status).
+  Failed `tuiTest` runs already write `failure-bundles/failure.txt`
+  automatically.
+- `writeRecording tui path` — export the captured frame log as JSONL with
+  wall-clock timestamps; replay with `tuispec replay PATH`.
+- `recordTraceTo = Just "trace.jsonl"` in `RunOptions` — automatic trace
+  recording. The runner writes a replayable JSONL trace under the per-test
+  artifact directory after every `tuiTest`, regardless of pass/fail. Render
+  the resulting artifact with `cabal run tuispec -- replay <path>` (use
+  `--speed as-fast-as-possible` for CI inspection).
+
 Run it:
 
 ```bash

@@ -18,17 +18,16 @@ module TuiSpec.Choice (
     trySelectNumberedChoiceWith,
 ) where
 
-import Control.Exception (Exception (displayException), throwIO)
+import Control.Exception (Exception (displayException), SomeException, throwIO, try)
 import Control.Monad (replicateM_, unless, when)
 import Data.Char (intToDigit, isDigit)
 import Data.List (find, findIndex)
-import Data.Maybe (isJust, listToMaybe, mapMaybe)
+import Data.Maybe (listToMaybe, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
-import System.Timeout (timeout)
 import Text.Read (readMaybe)
 import TuiSpec.Runner (currentView, defaultWaitOptionsFor, press, waitForSelector)
-import TuiSpec.Types (Key (..), Selector (..), Tui, WaitOptions (..))
+import TuiSpec.Types (Key (..), Selector (..), Tui, WaitOptions)
 
 -- | One numbered choice parsed from the visible viewport.
 data NumberedChoice = NumberedChoice
@@ -38,10 +37,14 @@ data NumberedChoice = NumberedChoice
     }
     deriving (Eq, Show)
 
+-- | Errors raised by 'selectNumberedChoice' when the prompt or choice cannot be located.
 data ChoiceSelectionError
-    = ChoicePromptTimedOut Text
-    | ChoiceNotFound Text Text [Text]
-    | ChoiceNotSelectable Text Text [Text]
+    = -- | The prompt text never appeared before the wait timeout.
+      ChoicePromptTimedOut Text
+    | -- | The prompt was visible but did not contain the requested choice.
+      ChoiceNotFound Text Text [Text]
+    | -- | The prompt was visible but had no selected marker for arrow-key fallback.
+      ChoiceNotSelectable Text Text [Text]
     deriving (Eq, Show)
 
 instance Exception ChoiceSelectionError where
@@ -95,15 +98,8 @@ trySelectNumberedChoiceWith tui waitOptions promptText choiceText = do
 
 waitForChoicePrompt :: Tui -> WaitOptions -> Text -> IO Bool
 waitForChoicePrompt tui waitOptions promptText = do
-    result <-
-        timeout
-            (waitTimeoutMicros waitOptions)
-            (waitForSelector tui waitOptions{timeoutMs = maxBound} (Exact promptText))
-    pure (isJust result)
-
-waitTimeoutMicros :: WaitOptions -> Int
-waitTimeoutMicros waitOptions =
-    max 1 (min (timeoutMs waitOptions) (maxBound `div` 1000)) * 1000
+    result <- try (waitForSelector tui waitOptions (Exact promptText)) :: IO (Either SomeException ())
+    pure (either (const False) (const True) result)
 
 selectVisibleNumberedChoice :: Tui -> Text -> Text -> IO ()
 selectVisibleNumberedChoice tui promptText choiceText = do
@@ -148,13 +144,13 @@ parseNumberedChoices =
     mapMaybe parseLine . Text.lines
   where
     parseLine line =
-        listToMaybe (mapMaybe parseCandidate (Text.tails (Text.map normalizeChoiceBorder line)))
+        listToMaybe (mapMaybe parseCandidate (Text.tails line))
 
     parseCandidate candidate = do
-        let stripped = Text.stripStart candidate
+        let stripped = Text.dropWhile isLeftPad candidate
         let (selected, body) =
                 case Text.stripPrefix ">" stripped of
-                    Just rest -> (True, Text.stripStart rest)
+                    Just rest -> (True, Text.dropWhile isLeftPad rest)
                     Nothing -> (False, stripped)
         let (digitsText, afterDigits) = Text.span isDigit body
         if Text.null digitsText || not (")" `Text.isPrefixOf` afterDigits)
@@ -163,9 +159,8 @@ parseNumberedChoices =
                 choiceNumber <- readMaybe (Text.unpack digitsText)
                 let label =
                         Text.strip $
-                            Text.takeWhileEnd (not . isChoiceBorder) $
-                                Text.strip $
-                                    Text.drop 1 afterDigits
+                            Text.takeWhile (not . isChoiceBorder) $
+                                Text.drop 1 afterDigits
                 if Text.null label
                     then Nothing
                     else
@@ -176,10 +171,7 @@ parseNumberedChoices =
                                 , numberedChoiceSelected = selected
                                 }
 
-normalizeChoiceBorder :: Char -> Char
-normalizeChoiceBorder char
-    | isChoiceBorder char = ' '
-    | otherwise = char
+    isLeftPad c = c == ' ' || c == '\t' || isChoiceBorder c
 
 isChoiceBorder :: Char -> Bool
 isChoiceBorder char = char `elem` ("│┃║|─━═┌┐└┘┏┓┗┛╔╗╚╝├┤┣┫" :: String)

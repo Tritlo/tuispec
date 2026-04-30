@@ -31,9 +31,11 @@ module TuiSpec.Types (
 ) where
 
 import Data.IORef (IORef)
+import Data.Int (Int64)
 import Data.String (IsString (..))
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Time.Clock (UTCTime)
 import System.Posix.Pty (Pty)
 import System.Process (ProcessHandle)
 
@@ -91,6 +93,12 @@ app commandValue argsValue =
 The action runs in a forked child process connected to the test PTY. This keeps
 the same terminal behavior as command launches without requiring a separate
 target executable path.
+
+The child is created with @forkProcess@ from the @unix@ package. This is safe
+under the single-threaded GHC RTS but is the usual fork-from-multithreaded-RTS
+landmine: avoid building tests that use 'haskellApp' with @-threaded@ unless
+the action only spawns subprocesses (@createProcess@/@readProcess@) and does
+no in-process Haskell I\/O after the fork.
 -}
 haskellApp :: String -> IO () -> App
 haskellApp name action =
@@ -122,6 +130,11 @@ data RunOptions = RunOptions
     , ambiguityMode :: AmbiguityMode
     , updateSnapshots :: Bool
     , snapshotTheme :: String
+    , recordTraceTo :: Maybe FilePath
+    {- ^ When @Just path@, the runner writes a JSONL trace recording to that
+    path (relative to the per-test artifact root, or absolute) after each
+    test, regardless of pass/fail. Replay with @tuispec replay PATH@.
+    -}
     }
     deriving (Eq, Show)
 
@@ -146,6 +159,7 @@ defaultRunOptions =
         , ambiguityMode = FailOnAmbiguous
         , updateSnapshots = False
         , snapshotTheme = "auto"
+        , recordTraceTo = Nothing
         }
 
 -- | The tuispec library/protocol version.
@@ -253,9 +267,15 @@ data TuiState = TuiState
     , visibleBuffer :: Text
     , rawBuffer :: Text
     , actionLog :: [Text]
+    -- ^ Action history, stored newest-first; reverse before display.
     , snapshotLog :: [Text]
+    -- ^ Snapshot artifact paths, stored newest-first.
     , runtimeWarnings :: [Text]
-    , frameLog :: [Text]
+    -- ^ Runtime warnings, stored newest-first.
+    , frameLog :: [(Int64, Text)]
+    {- ^ Captured viewport frames with wall-clock microseconds since the test
+    session began, stored newest-first.
+    -}
     }
 
 {- | Runtime test handle passed into each spec body.
@@ -271,4 +291,6 @@ data Tui = Tui
     , tuiSnapshotRoot :: FilePath
     , tuiPty :: IORef (Maybe PtyHandle)
     , tuiStateRef :: IORef TuiState
+    , tuiSessionStart :: UTCTime
+    -- ^ Wall-clock origin for trace timestamps (when this @Tui@ was created).
     }

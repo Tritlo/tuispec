@@ -13,6 +13,7 @@ module TuiSpec.Runner (
     artifactRoot,
     closeSession,
     currentView,
+    currentViewRect,
     dumpFailureBundle,
     dumpView,
     expectNotVisible,
@@ -137,7 +138,7 @@ openSession options name = do
     let sessionRoot = artifactBase </> "sessions" </> slugify name
     resetDirectory sessionRoot
     createDirectoryIfMissing True sessionRoot
-    mkTui projectRoot effectiveOptions name sessionRoot sessionRoot 1
+    mkTui projectRoot effectiveOptions name sessionRoot sessionRoot
 
 -- | Close and teardown a TUI session created with 'openSession'.
 closeSession :: Tui -> IO ()
@@ -226,6 +227,7 @@ launchAndWaitWith tui waitOptions appSpec readySelector = do
 press :: Tui -> Key -> IO ()
 press tui key = do
     appendAction tui ("press " <> renderKey key)
+    failIfLaunchedProcessExited tui "press"
     pty <- readPty tui
     case pty of
         Just ptyHandle -> do
@@ -249,6 +251,7 @@ pressCombo tui modifiers key = do
             <> T.pack (intercalate "+" (map show modifiers))
             <> "+"
             <> renderKey key
+    failIfLaunchedProcessExited tui "pressCombo"
     pty <- readPty tui
     case pty of
         Just ptyHandle ->
@@ -266,6 +269,7 @@ pressCombo tui modifiers key = do
 typeText :: Tui -> Text -> IO ()
 typeText tui textValue = do
     appendAction tui ("typeText " <> textValue)
+    failIfLaunchedProcessExited tui "typeText"
     pty <- readPty tui
     case pty of
         Just ptyHandle -> do
@@ -332,12 +336,15 @@ prependPathEntry dir = do
 currentView :: Tui -> IO Text
 currentView = syncVisibleBuffer
 
+-- | Return the current viewport text cropped to the given rectangle.
+currentViewRect :: Tui -> Rect -> IO Text
+currentViewRect tui rect = do
+    textValue <- syncVisibleBuffer tui
+    pure (cropRect rect textValue)
+
 -- | Assert that a selector eventually becomes visible.
 expectVisible :: Tui -> Selector -> IO ()
-expectVisible tui selector = do
-    waitFor tui (defaultWaitOptionsFor tui) (selectorMatches selector)
-    viewport <- currentViewport tui
-    assertNotAmbiguous tui selector viewport
+expectVisible = waitForText
 
 -- | Assert that a selector eventually becomes absent.
 expectNotVisible :: Tui -> Selector -> IO ()
@@ -346,10 +353,7 @@ expectNotVisible tui selector =
 
 -- | Wait for selector text and apply ambiguity checks.
 waitForText :: Tui -> Selector -> IO ()
-waitForText tui selector = do
-    waitFor tui (defaultWaitOptionsFor tui) (selectorMatches selector)
-    viewport <- currentViewport tui
-    assertNotAmbiguous tui selector viewport
+waitForText tui = waitForSelector tui (defaultWaitOptionsFor tui)
 
 -- | Wait for a selector with explicit wait options and ambiguity handling.
 waitForSelector :: Tui -> WaitOptions -> Selector -> IO ()
@@ -512,20 +516,25 @@ writeArtifactFile tui path textValue = do
     TIO.writeFile fullPath textValue
     pure fullPath
 
--- | Persist the current frame log as a JSONL recording compatible with replay.
+{- | Persist the captured frame log as a JSONL recording compatible with replay.
+
+Frames are recorded each time the visible buffer changes during the test, with
+wall-clock microseconds since the session began. Replay with
+@tuispec replay PATH@ to render the trace on a terminal.
+-}
 writeRecording :: Tui -> FilePath -> IO FilePath
 writeRecording tui path = do
     state <- readIORef (tuiStateRef tui)
     let fullPath = artifactFile tui path
     createDirectoryIfMissing True (takeDirectory fullPath)
-    BL.writeFile fullPath (BL.concat (map ((<> "\n") . encodeFrame) (zip [0 ..] (frameLog state))))
+    BL.writeFile fullPath (BL.concat (map ((<> "\n") . encodeFrame) (reverse (frameLog state))))
     pure fullPath
   where
     encodeFrame :: (Int64, Text) -> BL.ByteString
-    encodeFrame (index, frameText) =
+    encodeFrame (timestampMicros, frameText) =
         encode
             RecordingEvent
-                { recordingTimestampMicros = index * 100000
+                { recordingTimestampMicros = timestampMicros
                 , recordingDirection = DirectionFrame
                 , recordingLine = frameText
                 }
@@ -568,13 +577,13 @@ renderFailureBundle state snapshotResult viewResult exitResult =
         , "Snapshot: " <> renderSnapshotResult snapshotResult
         , ""
         , "Actions:"
-        , renderList (actionLog state)
+        , renderList (reverse (actionLog state))
         , ""
         , "Warnings:"
-        , renderList (runtimeWarnings state)
+        , renderList (reverse (runtimeWarnings state))
         , ""
         , "Snapshot artifacts:"
-        , renderList (snapshotLog state)
+        , renderList (reverse (snapshotLog state))
         , ""
         , "Viewport:"
         , renderViewResult viewResult
@@ -645,7 +654,7 @@ executeWithRetries projectRoot options specDef testRoot snapshotRoot = go 1
     go attempt = do
         resetDirectory testRoot
         createDirectoryIfMissing True testRoot
-        tui <- mkTui projectRoot options (specName specDef) testRoot snapshotRoot attempt
+        tui <- mkTui projectRoot options (specName specDef) testRoot snapshotRoot
         runResultAndState <-
             ( do
                 maybeRunResult <- timeout hardTimeoutMicros (try (specBody specDef tui))
@@ -673,6 +682,11 @@ executeWithRetries projectRoot options specDef testRoot snapshotRoot = go 1
                         _ <- timeout (500 * 1000) (syncVisibleBuffer tui)
                         pure ()
                     Nothing -> pure ()
+                case recordTraceTo options of
+                    Just tracePath -> do
+                        _ <- try (writeRecording tui tracePath) :: IO (Either SomeException FilePath)
+                        pure ()
+                    Nothing -> pure ()
                 state <- readIORef (tuiStateRef tui)
                 pure (runResult, state)
             )
@@ -684,9 +698,10 @@ executeWithRetries projectRoot options specDef testRoot snapshotRoot = go 1
                 | attempt < maxAttempts -> go (attempt + 1)
                 | otherwise -> pure (Failed (T.pack (displayException err)), state, attempt)
 
-mkTui :: FilePath -> RunOptions -> String -> FilePath -> FilePath -> Int -> IO Tui
-mkTui projectRoot options name testRoot snapshotRoot _attempt = do
+mkTui :: FilePath -> RunOptions -> String -> FilePath -> FilePath -> IO Tui
+mkTui projectRoot options name testRoot snapshotRoot = do
     ptyRef <- newIORef Nothing
+    sessionStart <- getCurrentTime
     stateRef <-
         newIORef
             TuiState
@@ -708,6 +723,7 @@ mkTui projectRoot options name testRoot snapshotRoot _attempt = do
                 , tuiSnapshotRoot = snapshotRoot
                 , tuiPty = ptyRef
                 , tuiStateRef = stateRef
+                , tuiSessionStart = sessionStart
                 }
     pure tui
 
@@ -799,6 +815,11 @@ runHaskellPtyChild processEnv initialSlaveFd masterFd slaveName maybeCwd action 
         maybe (pure ()) changeWorkingDirectory maybeCwd
         action
 
+{- | Enable TIOCPKT on the master fd. Empirically required to keep the forked
+Haskell child process alive on the @HaskellApp@ path; without it the child
+exits before the test body can interact with it. The packet-mode prefix byte
+is always @< ' '@ and is dropped by the ANSI emulator's printable-char filter.
+-}
 enablePacketMode :: Fd -> IO ()
 enablePacketMode fd =
     throwErrnoIfMinus1_ "failed to enable PTY packet mode" (c_tuispec_enable_packet_mode fd)
@@ -982,7 +1003,7 @@ modifyState tui updateFn = modifyIORef' (tuiStateRef tui) updateFn
 appendAction :: Tui -> Text -> IO ()
 appendAction tui actionText =
     modifyState tui $ \state ->
-        state{actionLog = actionLog state <> [actionText]}
+        state{actionLog = actionText : actionLog state}
 
 appendSnapshotArtifact :: Tui -> FilePath -> IO ()
 appendSnapshotArtifact tui snapshotPath = do
@@ -990,19 +1011,23 @@ appendSnapshotArtifact tui snapshotPath = do
     modifyState tui $ \state ->
         if relativePath `elem` snapshotLog state
             then state
-            else state{snapshotLog = snapshotLog state <> [relativePath]}
+            else state{snapshotLog = relativePath : snapshotLog state}
 
 appendWarning :: Tui -> Text -> IO ()
 appendWarning tui warningText =
     modifyState tui $ \state ->
-        state{runtimeWarnings = runtimeWarnings state <> [warningText]}
+        state{runtimeWarnings = warningText : runtimeWarnings state}
 
 recordFrame :: Tui -> Text -> IO ()
-recordFrame tui frameText =
+recordFrame tui frameText = do
+    now <- getCurrentTime
+    let elapsedMicros =
+            round (realToFrac (diffUTCTime now (tuiSessionStart tui)) * 1e6 :: Double) ::
+                Int64
     modifyState tui $ \state ->
-        case reverse (frameLog state) of
-            latest : _ | latest == frameText -> state
-            _ -> state{frameLog = frameLog state <> [frameText]}
+        case frameLog state of
+            (_, latest) : _ | latest == frameText -> state
+            _ -> state{frameLog = (elapsedMicros, frameText) : frameLog state}
 
 renderKey :: Key -> Text
 renderKey key =
@@ -1747,10 +1772,6 @@ selectorMatches selector viewport =
         Within rect nested ->
             selectorMatches nested (viewport{viewportText = cropRect rect (viewportText viewport)})
         Nth idx nested -> matchCount nested viewport > idx
-
-assertNotAmbiguous :: Tui -> Selector -> Viewport -> IO ()
-assertNotAmbiguous tui selector viewport =
-    assertNotAmbiguousWithMode (tuiName tui) (ambiguityMode (tuiOptions tui)) selector viewport
 
 assertNotAmbiguousWithMode :: String -> AmbiguityMode -> Selector -> Viewport -> IO ()
 assertNotAmbiguousWithMode testName mode selector viewport =

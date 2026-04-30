@@ -103,6 +103,19 @@ main =
                         assertBool "trySelectNumberedChoice should find the Python choice" selected
                         waitForText tui (Exact "picked:2")
                     )
+            , tuiTest
+                defaultRunOptions
+                    { timeoutSeconds = 8
+                    , artifactsDir = "artifacts/auto-trace"
+                    , ambiguityMode = FirstVisibleMatch
+                    , recordTraceTo = Just "trace.jsonl"
+                    }
+                "smoke: recordTraceTo writes a replayable JSONL artifact"
+                $ \tui -> do
+                    launch tui (app "sh" [])
+                    sendLine tui "printf 'trace-line\\n'"
+                    waitForText tui (Exact "trace-line")
+                    sendLine tui "exit"
             , testCase "smoke: failure bundle and recording helpers" $
                 withTuiSession
                     defaultRunOptions
@@ -324,17 +337,10 @@ testServerAdditions =
                     server
                     9
                     "dumpView"
-                    ( object
-                        [ "name" .= ("snap-a" :: Text)
-                        , "format" .= ("both" :: Text)
-                        ]
-                    )
+                    (object ["name" .= ("snap-a" :: Text)])
         snapA <- fieldText "snapshotPath" dumpResult
-        pngA <- fieldText "pngPath" dumpResult
         snapAExists <- doesFileExist (T.unpack snapA)
-        pngAExists <- doesFileExist (T.unpack pngA)
         assertBool "dumpView should emit ANSI snapshot path" snapAExists
-        assertBool "dumpView format=both should emit PNG" pngAExists
 
         _ <-
             expectResult
@@ -348,9 +354,14 @@ testServerAdditions =
                         ]
                     )
 
-        renderResult <- expectResult =<< rpcCall server 11 "renderView" (object ["name" .= ("snap-b" :: Text)])
-        snapB <- fieldText "snapshotPath" renderResult
-        _ <- fieldText "pngPath" renderResult
+        dumpResultB <-
+            expectResult
+                =<< rpcCall
+                    server
+                    11
+                    "dumpView"
+                    (object ["name" .= ("snap-b" :: Text)])
+        snapB <- fieldText "snapshotPath" dumpResultB
 
         diffChanged <-
             expectResult
@@ -705,22 +716,30 @@ waitForFile path = go (20 :: Int)
 
 locateTuiSpecExecutable :: IO FilePath
 locateTuiSpecExecutable = do
-    (exitCode, stdoutText, stderrText) <-
-        Process.readCreateProcessWithExitCode
-            ( Process.proc
-                "sh"
-                [ "-lc"
-                , "find dist-newstyle/build -type f -path '*/x/tuispec/build/tuispec/tuispec' | sort | tail -n 1"
-                ]
-            )
-            ""
-    case exitCode of
-        ExitSuccess ->
-            case lines stdoutText of
-                [] -> assertFailure "Could not locate built tuispec executable in dist-newstyle"
-                pathValue : _ | null pathValue -> assertFailure "Located empty executable path"
-                pathValue : _ -> pure pathValue
-        _ -> assertFailure ("Failed to locate tuispec executable: " <> stderrText)
+    overrideValue <- lookupEnv "TUISPEC_EXECUTABLE"
+    case overrideValue of
+        Just path | not (null path) -> do
+            exists <- doesFileExist path
+            if exists
+                then pure path
+                else assertFailure ("TUISPEC_EXECUTABLE points to a missing file: " <> path)
+        _ -> do
+            (exitCode, stdoutText, stderrText) <-
+                Process.readCreateProcessWithExitCode
+                    ( Process.proc
+                        "sh"
+                        [ "-lc"
+                        , "find dist-newstyle/build dist/build -type f \\( -path '*/x/tuispec/build/tuispec/tuispec' -o -path '*/build/tuispec/tuispec' \\) 2>/dev/null | sort | tail -n 1"
+                        ]
+                    )
+                    ""
+            case exitCode of
+                ExitSuccess ->
+                    case lines stdoutText of
+                        [] -> assertFailure "Could not locate built tuispec executable; set TUISPEC_EXECUTABLE to override"
+                        pathValue : _ | null pathValue -> assertFailure "Located empty executable path"
+                        pathValue : _ -> pure pathValue
+                _ -> assertFailure ("Failed to locate tuispec executable: " <> stderrText)
 
 applyEnvOverrides :: [(String, String)] -> [(String, String)] -> [(String, String)]
 applyEnvOverrides base overrides =
