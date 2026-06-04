@@ -25,9 +25,11 @@ done
 rm -rf dist-newstyle/"$PACKAGE"-[0-9]*-docs.tar.gz
 rm -rf dist-newstyle/sdist/"$PACKAGE"-[0-9]*.tar.gz
 
-# Build docs and sdist
-cabal haddock --haddock-for-hackage "$PACKAGE"
-cabal sdist "$PACKAGE"
+# Build docs and sdist. The package name is ambiguous when the project also
+# defines a same-named executable, so haddock takes `lib:$PACKAGE` and sdist
+# runs with no target (operates on every local package, of which we have one).
+cabal haddock --haddock-for-hackage "lib:$PACKAGE"
+cabal sdist
 
 # Credentials
 read -p "Username: " username
