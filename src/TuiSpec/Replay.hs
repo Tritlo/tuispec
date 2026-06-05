@@ -245,8 +245,8 @@ applyReplayDelay speed maybePrev event =
                     when (delta > 0) $ threadDelay (fromIntegral delta)
 
 {- | Extract a human-readable input label from a JSON-RPC request line.
-Returns @Just label@ for input methods (@sendKey@, @sendText@, @sendLine@),
-@Nothing@ for non-input methods.
+Returns @Just label@ for input methods (@sendKey@, @click@, @sendText@,
+@sendLine@), @Nothing@ for non-input methods.
 -}
 extractInputLabel :: Text -> Maybe Text
 extractInputLabel rawLine =
@@ -266,6 +266,7 @@ extractInputLabel rawLine =
                         case KM.lookup "key" params of
                             Just (String k) -> Just ("Key: " <> k)
                             _ -> Nothing
+                    "click" -> Just ("Click: " <> clickLabel params)
                     "sendText" ->
                         case KM.lookup "text" params of
                             Just (String t) -> Just ("Text: " <> showTextValue t)
@@ -280,6 +281,24 @@ extractInputLabel rawLine =
         | t == " " = "<Space>"
         | t == "\t" = "<Tab>"
         | otherwise = "\"" <> t <> "\""
+
+    clickLabel params =
+        case (KM.lookup "col" params, KM.lookup "row" params) of
+            (Just (Number c), Just (Number r)) ->
+                showNumber c <> "," <> showNumber r
+            _ ->
+                case KM.lookup "selector" params of
+                    Just (Object sel) -> selectorLabel sel
+                    _ -> "?"
+
+    selectorLabel sel =
+        case (KM.lookup "text" sel, KM.lookup "pattern" sel, KM.lookup "type" sel) of
+            (Just (String t), _, _) -> "\"" <> t <> "\""
+            (_, Just (String p), _) -> "/" <> p <> "/"
+            (_, _, Just (String ty)) -> ty
+            _ -> "?"
+
+    showNumber n = T.pack (show (round n :: Int))
 
 {- | Compute a line-level delta between two viewport texts. Returns
 @Nothing@ when the frames are identical, or @Just encodedDelta@ with a

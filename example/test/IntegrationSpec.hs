@@ -28,6 +28,15 @@ main =
                 waitForText tui (Exact "Recent Events")
                 expectSnapshot tui "logs"
                 press tui (CharKey 'q')
+            , tuiTest options "brick demo mouse click" $ \tui -> do
+                launch tui (app "sh" ["-lc", demoLaunchCommand])
+                waitForText tui (Exact "[ CLICK ME ] clicked=0")
+                clickSelector tui (Exact "CLICK ME")
+                waitForText tui (Exact "[ CLICK ME ] clicked=1")
+                clickSelector tui (Exact "CLICK ME")
+                waitForText tui (Exact "[ CLICK ME ] clicked=2")
+                expectSnapshot tui "mouse-click"
+                press tui (CharKey 'q')
             , tuiTest options "brick demo resets between tests" $ \tui -> do
                 launch tui (app "sh" ["-lc", demoLaunchCommand])
                 waitForText tui (Exact "Agent Readiness")

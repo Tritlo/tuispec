@@ -3,11 +3,12 @@
 module Main where
 
 import Brick.AttrMap (AttrMap, attrMap, attrName)
-import Brick.Main (App (..), defaultMain, halt)
+import Brick.Main (App (..), customMain, halt)
 import Brick.Types (BrickEvent (..), CursorLocation, EventM, Widget)
 import Brick.Widgets.Border (borderWithLabel)
 import Brick.Widgets.Core (
     Padding (..),
+    clickable,
     fill,
     hBox,
     hLimitPercent,
@@ -20,10 +21,14 @@ import Brick.Widgets.Core (
     vLimitPercent,
     withAttr,
  )
+import Control.Monad (void, when)
 import Control.Monad.State.Strict (get, modify)
 import Graphics.Vty qualified as V
+import Graphics.Vty.CrossPlatform qualified as VCP
 
-data Name = MainUi
+data Name
+    = MainUi
+    | ClickButton
     deriving (Eq, Ord, Show)
 
 data Screen
@@ -57,6 +62,7 @@ data St = St
     , commandOpen :: Bool
     , commandInput :: String
     , counter :: Int
+    , clickCount :: Int
     , taskCursor :: Int
     , tasks :: [Task]
     , ticketCursor :: Int
@@ -65,8 +71,14 @@ data St = St
 
 main :: IO ()
 main = do
-    _ <- defaultMain app initialState
-    pure ()
+    let buildVty = do
+            vty <- VCP.mkVty V.defaultConfig
+            let output = V.outputIface vty
+            when (V.supportsMode output V.Mouse) $
+                V.setMode output V.Mouse True
+            pure vty
+    initialVty <- buildVty
+    void $ customMain initialVty buildVty Nothing app initialState
 
 initialState :: St
 initialState =
@@ -78,6 +90,7 @@ initialState =
         , commandOpen = False
         , commandInput = ""
         , counter = 0
+        , clickCount = 0
         , taskCursor = 0
         , tasks =
             [ Task "Write selectors for panes" False
@@ -182,6 +195,8 @@ mainPane st =
                     , str ("Open tasks: " <> show (length (filter (not . taskDone) (tasks st))))
                     , str ("Done tasks: " <> show (length (filter taskDone (tasks st))))
                     , str "Keys: + / - adjust counter, / command palette"
+                    , clickable ClickButton $
+                        withAttr (attrName "accent") (str ("[ CLICK ME ] clicked=" <> show (clickCount st)))
                     ]
             Board ->
                 vBox
@@ -271,6 +286,7 @@ handleNormalEvent eventValue =
         VtyEvent (V.EvKey (V.KChar 'j') []) -> updateAndEmit moveDown "cursor down"
         VtyEvent (V.EvKey (V.KChar 'k') []) -> updateAndEmit moveUp "cursor up"
         VtyEvent (V.EvKey (V.KChar ' ') []) -> updateAndEmit toggleCurrentTask "task toggled"
+        MouseDown ClickButton _ _ _ -> updateAndEmit (\st -> st{clickCount = clickCount st + 1}) "click registered"
         _ -> pure ()
   where
     moveDown st =

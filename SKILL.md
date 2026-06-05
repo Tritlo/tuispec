@@ -214,6 +214,23 @@ view. This replaces fixed sleeps and makes the script reliable across machines.
 - `Ctrl+X`, `Alt+X`, `Shift+X`
 - single character like `"a"`
 
+### Simulating mouse clicks with `click`
+
+The `click` method synthesizes a mouse click (button press + release). Target
+either a 1-based coordinate or a selector:
+
+```json
+{"jsonrpc":"2.0","id":10,"method":"click","params":{"col":12,"row":7}}
+{"jsonrpc":"2.0","id":11,"method":"click","params":{"selector":{"type":"exact","text":"OK"}}}
+{"jsonrpc":"2.0","id":12,"method":"click","params":{"selector":{"type":"exact","text":"Menu"},"button":"right"}}
+```
+
+The target application only reacts if it has enabled mouse tracking
+(`vty`/Brick apps do once mouse mode is turned on). The default `sgr` encoding
+suits any modern TUI; pass `"encoding":"x10"` only for apps that enable just
+legacy `\ESC[?1000h` tracking. As with key input, follow a click with
+`waitForStable` before dumping the view.
+
 ### Dump locations
 
 For `initialize` name `demo`:

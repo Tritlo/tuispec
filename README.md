@@ -86,9 +86,17 @@ launch    :: Tui -> App -> IO ()
 app       :: FilePath -> [String] -> App
 press     :: Tui -> Key -> IO ()
 pressCombo :: Tui -> [Modifier] -> Key -> IO ()
+click     :: Tui -> Int -> Int -> IO ()      -- left-click at (col, row), 0-based
+clickSelector :: Tui -> Selector -> IO ()    -- click the element a selector matches
 typeText  :: Tui -> Text -> IO ()
 sendLine  :: Tui -> Text -> IO ()
 ```
+
+Mouse clicks are written to the PTY just like keys, so the target app only
+reacts if it has enabled mouse tracking (anything built on `vty`/Brick does
+once mouse mode is on). The default SGR encoding suits any modern TUI; use
+`clickWith`/`clickSelectorWith` with `ClickOptions` to pick the button
+(`MouseLeft`/`MouseMiddle`/`MouseRight`) or the legacy X10 encoding.
 
 ### Waits and assertions
 
@@ -191,7 +199,11 @@ Input examples:
 {"jsonrpc":"2.0","id":7,"method":"sendKey","params":{"key":"+"}}
 {"jsonrpc":"2.0","id":8,"method":"sendKey","params":{"key":"Ctrl+C"}}
 {"jsonrpc":"2.0","id":9,"method":"sendText","params":{"text":"hello"}}
+{"jsonrpc":"2.0","id":10,"method":"click","params":{"col":12,"row":7}}
+{"jsonrpc":"2.0","id":11,"method":"click","params":{"selector":{"type":"exact","text":"OK"}}}
 ```
+
+(Server `click` coordinates are 1-based, like the `at` selector.)
 
 Replay a recording JSONL file:
 

@@ -20,7 +20,8 @@ executable tui-demo
         base >=4.16 && <5,
         brick >=2.4,
         mtl >=2.2,
-        vty >=6.0
+        vty >=6.0,
+        vty-crossplatform >=0.4
 
 test-suite tui-demo-integration
     import: common-settings

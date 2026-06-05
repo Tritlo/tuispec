@@ -46,8 +46,8 @@ import System.Posix.Signals (Handler (Catch), installHandler, sigHUP)
 import TuiSpec.Internal (regexLikeMatch, safeFileStem, safeIndex, snapshotMetadataPath)
 import TuiSpec.Render (renderAnsiSnapshotFileWithFont)
 import TuiSpec.Replay (RecordingDirection (DirectionFrame, DirectionFrameDelta, DirectionNotification, DirectionRequest, DirectionResponse), RecordingHandle, ReplaySpeed (ReplayAsFastAsPossible, ReplayRealTime), appendRecordingEvent, closeRecording, computeFrameDelta, openRecording, streamReplayRequests)
-import TuiSpec.Runner (currentView, defaultWaitOptionsFor, dumpView, expectNotVisible, expectSnapshot, expectVisible, killSessionChildrenNow, launch, openSession, press, pressCombo, renderAnsiViewportText, sendLine, serializeAnsiSnapshot, typeText, waitForSelectorWithAmbiguity, waitForStable)
-import TuiSpec.Types (AmbiguityMode (FailOnAmbiguous, FirstVisibleMatch, LastVisibleMatch), App (..), Key (..), Modifier (Alt, Control, Shift), Rect (Rect), RunOptions (..), Selector (..), SnapshotName (SnapshotName), Tui (..), WaitOptions (..), defaultRunOptions, tuispecVersion)
+import TuiSpec.Runner (clickSelectorWith, clickWith, currentView, defaultWaitOptionsFor, dumpView, expectNotVisible, expectSnapshot, expectVisible, killSessionChildrenNow, launch, openSession, press, pressCombo, renderAnsiViewportText, sendLine, serializeAnsiSnapshot, typeText, waitForSelectorWithAmbiguity, waitForStable)
+import TuiSpec.Types (AmbiguityMode (FailOnAmbiguous, FirstVisibleMatch, LastVisibleMatch), App (..), ClickOptions (..), Key (..), Modifier (Alt, Control, Shift), MouseButton (..), MouseEncoding (..), Rect (Rect), RunOptions (..), Selector (..), SnapshotName (SnapshotName), Tui (..), WaitOptions (..), defaultClickOptions, defaultRunOptions, tuispecVersion)
 
 -- | Configuration for the JSON-RPC server.
 data ServerOptions = ServerOptions
@@ -170,6 +170,7 @@ dispatchMethod state methodName paramsValue =
         "initialize" -> dispatchInitialize state paramsValue
         "launch" -> dispatchLaunch state paramsValue
         "sendKey" -> dispatchSendKey state paramsValue
+        "click" -> dispatchClick state paramsValue
         "sendText" -> dispatchSendText state paramsValue
         "sendLine" -> dispatchSendLine state paramsValue
         "currentView" -> dispatchCurrentView state paramsValue
@@ -279,6 +280,62 @@ dispatchSendKey state paramsValue =
                                 else pressCombo tui modifiers keyValue
                             emitViewChangedNotification state tui
                             pure (object ["ok" .= True])
+
+dispatchClick :: ServerState -> Value -> IO (Either RpcFailure DispatchOutcome)
+dispatchClick state paramsValue =
+    withActiveSession state $ \active ->
+        case decodeParamsValue paramsValue of
+            Left err -> pure (Left err)
+            Right params ->
+                case resolveClickOptions params of
+                    Left optionErr -> pure (Left (invalidParams optionErr))
+                    Right options ->
+                        case resolveClickTarget params of
+                            Left targetErr -> pure (Left (invalidParams targetErr))
+                            Right target ->
+                                runMethod $ do
+                                    let tui = activeTui active
+                                    case target of
+                                        ClickAtCoordinate col row ->
+                                            clickWith tui options (col - 1) (row - 1)
+                                        ClickAtSelector selector ->
+                                            clickSelectorWith tui options selector
+                                    emitViewChangedNotification state tui
+                                    pure (object ["ok" .= True])
+
+-- | Where a @click@ request should land: an explicit coordinate or a selector.
+data ClickTarget
+    = ClickAtCoordinate Int Int
+    | ClickAtSelector Selector
+
+resolveClickTarget :: ClickParams -> Either String ClickTarget
+resolveClickTarget params =
+    case (clickParamSelector params, clickParamCol params, clickParamRow params) of
+        (Just selector, _, _) -> Right (ClickAtSelector selector)
+        (Nothing, Just col, Just row)
+            | col < 1 || row < 1 ->
+                Left "click uses 1-based coordinates; col/row must be >= 1"
+            | otherwise -> Right (ClickAtCoordinate col row)
+        (Nothing, _, _) ->
+            Left "click requires either a selector or both col and row"
+
+resolveClickOptions :: ClickParams -> Either String ClickOptions
+resolveClickOptions params = do
+    button <- maybe (Right (clickButton defaultClickOptions)) parseMouseButton (clickParamButton params)
+    encoding <- maybe (Right (clickEncoding defaultClickOptions)) parseMouseEncoding (clickParamEncoding params)
+    pure ClickOptions{clickButton = button, clickEncoding = encoding}
+  where
+    parseMouseButton textValue =
+        case T.toLower textValue of
+            "left" -> Right MouseLeft
+            "middle" -> Right MouseMiddle
+            "right" -> Right MouseRight
+            _ -> Left ("unknown mouse button: " <> T.unpack textValue)
+    parseMouseEncoding textValue =
+        case T.toLower textValue of
+            "sgr" -> Right MouseSGR
+            "x10" -> Right MouseX10
+            _ -> Left ("unknown mouse encoding: " <> T.unpack textValue)
 
 dispatchSendText :: ServerState -> Value -> IO (Either RpcFailure DispatchOutcome)
 dispatchSendText state paramsValue =
@@ -962,6 +1019,24 @@ instance FromJSON SendKeyParams where
     parseJSON =
         withObject "SendKeyParams" $ \o ->
             SendKeyParams <$> o .: "key"
+
+data ClickParams = ClickParams
+    { clickParamSelector :: Maybe Selector
+    , clickParamCol :: Maybe Int
+    , clickParamRow :: Maybe Int
+    , clickParamButton :: Maybe Text
+    , clickParamEncoding :: Maybe Text
+    }
+
+instance FromJSON ClickParams where
+    parseJSON =
+        withObject "ClickParams" $ \o ->
+            ClickParams
+                <$> (o .:? "selector" >>= traverse parseSelector)
+                <*> o .:? "col"
+                <*> o .:? "row"
+                <*> o .:? "button"
+                <*> o .:? "encoding"
 
 data SendTextParams = SendTextParams
     { sendTextValue :: Text

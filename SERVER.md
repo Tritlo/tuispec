@@ -82,6 +82,16 @@ Defaults:
 - `sendKey`
   - params: `key`
 
+- `click`
+  - params (one of two targets):
+    - coordinate form: `col`, `row` (both 1-based)
+    - selector form: `selector`
+    - optional `button` (`left` | `middle` | `right`, default `left`)
+    - optional `encoding` (`sgr` | `x10`, default `sgr`)
+  - result: `ok`
+  - emits a button press and release; the target app must have mouse
+    tracking enabled (vty/Brick apps do once mouse mode is turned on)
+
 - `sendText`
   - params: `text`
 

@@ -11,6 +11,10 @@ functions ('launch', 'press', 'waitForText', 'expectSnapshot', ...).
 module TuiSpec.Runner (
     artifactFile,
     artifactRoot,
+    click,
+    clickWith,
+    clickSelector,
+    clickSelectorWith,
     closeSession,
     currentView,
     currentViewRect,
@@ -28,6 +32,7 @@ module TuiSpec.Runner (
     pressCombo,
     prependPathEntry,
     renderAnsiViewportText,
+    selectorOrigin,
     sendLine,
     serializeAnsiSnapshot,
     step,
@@ -51,13 +56,14 @@ import Control.Exception (Exception, SomeException, displayException, finally, f
 import Control.Monad (forM_, unless, when)
 import Data.Aeson (encode, object, (.=))
 import Data.ByteString qualified as BS
+import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy qualified as BL
 import Data.Char (chr, ord, toLower)
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Int (Int64)
 import Data.IntMap.Strict qualified as IM
 import Data.List (intercalate, nub, sort)
-import Data.Maybe (fromMaybe, isJust)
+import Data.Maybe (fromMaybe, isJust, listToMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
@@ -264,6 +270,81 @@ pressCombo tui modifiers key = do
                 Nothing -> press tui key
         Nothing ->
             throwIO (AssertionError "PTY backend unavailable during combo key press")
+
+{- | Left-click at a viewport coordinate.
+
+Coordinates are 0-based, matching the 'At' selector (the top-left cell is
+@0 0@). Uses SGR mouse encoding with the left button; see 'clickWith' for
+explicit button and encoding control.
+
+The target application only reacts to clicks if it has enabled mouse tracking
+(anything built on @vty@\/Brick does once mouse mode is turned on). A click on
+an application without mouse tracking is silently ignored by that application.
+-}
+click :: Tui -> Int -> Int -> IO ()
+click tui = clickWith tui defaultClickOptions
+
+{- | Click at a viewport coordinate with explicit button and encoding.
+
+Coordinates are 0-based. A click emits both a button press and a release so
+that applications reacting to either edge observe the event.
+-}
+clickWith :: Tui -> ClickOptions -> Int -> Int -> IO ()
+clickWith tui options col row = do
+    appendAction tui $
+        "click "
+            <> T.pack (show (clickButton options))
+            <> " "
+            <> T.pack (show col)
+            <> ","
+            <> T.pack (show row)
+    failIfLaunchedProcessExited tui "click"
+    pty <- readPty tui
+    case pty of
+        Just ptyHandle -> do
+            sendPtyBytes ptyHandle (encodeMouseClick options (col + 1) (row + 1))
+            threadDelay settleDelayMicros
+            _ <- syncVisibleBuffer tui
+            pure ()
+        Nothing ->
+            throwIO (AssertionError "PTY backend unavailable during click")
+
+{- | Click on the element matched by a selector (Playwright-style).
+
+The selector is resolved against the current viewport to its match origin and
+that coordinate is clicked. Honors the run's 'ambiguityMode': under
+'FailOnAmbiguous' a non-explicit selector matching more than one element
+fails. Resolves to the first match's origin (matching is line-oriented, so a
+match spanning a line boundary is reported as no match). Uses SGR mouse
+encoding; see 'clickSelectorWith' for button and encoding control.
+-}
+clickSelector :: Tui -> Selector -> IO ()
+clickSelector tui = clickSelectorWith tui defaultClickOptions
+
+-- | Click on the element matched by a selector with explicit button and encoding.
+clickSelectorWith :: Tui -> ClickOptions -> Selector -> IO ()
+clickSelectorWith tui options selector = do
+    appendAction tui ("clickSelector " <> T.pack (show selector))
+    failIfLaunchedProcessExited tui "clickSelector"
+    viewportTextValue <- syncVisibleBuffer tui
+    let runOptions = tuiOptions tui
+        viewport =
+            Viewport
+                { viewportCols = terminalCols runOptions
+                , viewportRows = terminalRows runOptions
+                , viewportText = viewportTextValue
+                }
+    assertNotAmbiguousWithMode (tuiName tui) (ambiguityMode runOptions) selector viewport
+    case selectorOrigin selector viewport of
+        Just (col, row) -> clickWith tui options col row
+        Nothing ->
+            throwIO
+                ( AssertionError
+                    ( "clickSelector found no match for selector in test '"
+                        <> tuiName tui
+                        <> "'."
+                    )
+                )
 
 -- | Send literal text to the PTY application.
 typeText :: Tui -> Text -> IO ()
@@ -1102,9 +1183,52 @@ comboToPtyText modifiers key
         | c >= 'a' && c <= 'z' = chr (ord c - 32)
         | otherwise = c
 
+{- | Encode a mouse click (button press followed by release) as terminal
+input bytes.
+
+Takes 1-based column and row. SGR encoding (the default) has no coordinate
+limit; X10 encoding offsets each value by 32 and clamps to a single byte, so
+it cannot address columns or rows beyond 223.
+-}
+encodeMouseClick :: ClickOptions -> Int -> Int -> BS.ByteString
+encodeMouseClick options col row =
+    case clickEncoding options of
+        MouseSGR ->
+            let sgr final =
+                    BS8.pack
+                        ( "\ESC[<"
+                            <> show buttonCode
+                            <> ";"
+                            <> show col
+                            <> ";"
+                            <> show row
+                            <> [final]
+                        )
+             in sgr 'M' <> sgr 'm'
+        MouseX10 ->
+            let clampByte v = min 255 (max 32 v)
+                cx = clampByte (col + 32)
+                cy = clampByte (row + 32)
+                x10 code =
+                    BS.pack
+                        [0x1b, 0x5b, 0x4d, fromIntegral (clampByte (code + 32)), fromIntegral cx, fromIntegral cy]
+             in x10 buttonCode <> x10 releaseCode
+  where
+    buttonCode :: Int
+    buttonCode =
+        case clickButton options of
+            MouseLeft -> 0
+            MouseMiddle -> 1
+            MouseRight -> 2
+    releaseCode = 3 :: Int
+
 sendPtyText :: PtyHandle -> Text -> IO ()
 sendPtyText ptyHandle textValue =
     Pty.writePty (ptyMaster ptyHandle) (TE.encodeUtf8 textValue)
+
+-- | Write raw bytes to the PTY (used for mouse reports, which are not text).
+sendPtyBytes :: PtyHandle -> BS.ByteString -> IO ()
+sendPtyBytes ptyHandle = Pty.writePty (ptyMaster ptyHandle)
 
 drainPtyOutput :: Pty.Pty -> IO BS.ByteString
 drainPtyOutput pty = BS.concat . reverse <$> go 0 []
@@ -1810,6 +1934,73 @@ matchCount selector viewport =
             if selectorMatches selector viewport then 1 else 0
         Nth _ _ ->
             if selectorMatches selector viewport then 1 else 0
+
+{- | Resolve a selector to the 0-based @(col, row)@ origin of its first match
+in the viewport, or 'Nothing' when nothing matches.
+
+Used by 'clickSelector'. Origins are 0-based to match the 'At' selector.
+'Regex' resolves to the first non-blank column of the first matching line.
+
+Matching is line-oriented: a match that spans a line boundary (a multi-line
+'Exact' needle, or a 'Regex' whose @.*@ crosses a newline) resolves to
+'Nothing' even though the whole-text matchers treat it as a hit.
+'clickSelector' turns that into a \"no match\" error.
+-}
+selectorOrigin :: Selector -> Viewport -> Maybe (Int, Int)
+selectorOrigin selector viewport =
+    case selector of
+        Exact textValue ->
+            listToMaybe (exactOrigins textValue (viewportText viewport))
+        At col row -> Just (col, row)
+        Within rect nested -> do
+            (col, row) <-
+                selectorOrigin
+                    nested
+                    (viewport{viewportText = cropRect rect (viewportText viewport)})
+            pure (col + rectCol rect, row + rectRow rect)
+        Nth idx nested ->
+            case nested of
+                Exact textValue ->
+                    safeIndex idx (exactOrigins textValue (viewportText viewport))
+                Regex patternText ->
+                    safeIndex idx (regexOrigins patternText (viewportText viewport))
+                _ ->
+                    if matchCount nested viewport > idx
+                        then selectorOrigin nested viewport
+                        else Nothing
+        Regex patternText ->
+            listToMaybe (regexOrigins patternText (viewportText viewport))
+
+{- | All 0-based @(col, row)@ origins of a lightweight regex pattern, one per
+matching line, taken at the line's first non-blank column.
+-}
+regexOrigins :: Text -> Text -> [(Int, Int)]
+regexOrigins patternText textValue =
+    [ (T.length (T.takeWhile (== ' ') line), rowIdx)
+    | (rowIdx, line) <- zip [0 ..] (T.lines textValue)
+    , regexLikeMatch patternText line
+    ]
+
+-- | All 0-based @(col, row)@ origins of a literal substring within viewport text.
+exactOrigins :: Text -> Text -> [(Int, Int)]
+exactOrigins needle textValue
+    | T.null needle = []
+    | otherwise =
+        [ (col, rowIdx)
+        | (rowIdx, line) <- zip [0 ..] (T.lines textValue)
+        , col <- lineOccurrences line
+        ]
+  where
+    needleLen = T.length needle
+    lineOccurrences = go 0
+      where
+        go base hay =
+            let (prefix, suffix) = T.breakOn needle hay
+             in if T.null suffix
+                    then []
+                    else
+                        let col = base + T.length prefix
+                         in col : go (col + needleLen) (T.drop (T.length prefix + needleLen) hay)
 
 regexAlternativeCount :: Text -> Text -> Int
 regexAlternativeCount alternative haystack

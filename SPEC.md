@@ -98,6 +98,10 @@ withTuiSession defaultRunOptions "demo" $ \tui -> do
 - `app :: FilePath -> [String] -> App`
 - `press :: Tui -> Key -> IO ()`
 - `pressCombo :: Tui -> [Modifier] -> Key -> IO ()`
+- `click :: Tui -> Int -> Int -> IO ()`
+- `clickWith :: Tui -> ClickOptions -> Int -> Int -> IO ()`
+- `clickSelector :: Tui -> Selector -> IO ()`
+- `clickSelectorWith :: Tui -> ClickOptions -> Selector -> IO ()`
 - `typeText :: Tui -> Text -> IO ()`
 - `sendLine :: Tui -> Text -> IO ()`
 
@@ -161,6 +165,27 @@ Ambiguity mode:
 - `[Control] + CharKey c`
 - `[Alt] + CharKey c`
 - `[Shift] + CharKey c`
+
+### 4.6a Mouse input model
+
+`click` and `clickSelector` synthesize a mouse click (a button press followed
+by a release) written to the PTY, mirroring how key input is sent.
+
+- `ClickOptions`: `clickButton` (`MouseLeft` | `MouseMiddle` | `MouseRight`)
+  and `clickEncoding` (`MouseSGR` | `MouseX10`).
+- `defaultClickOptions`: left button, SGR encoding.
+- DSL coordinates are 0-based, matching the `At` selector (top-left is `0 0`).
+- `clickSelector` resolves the selector to its first match's origin and clicks
+  there; it honors `ambiguityMode` like other selector assertions.
+
+Encoding notes:
+- `MouseSGR` (default) emits `\ESC[<btn;col;rowM` / `...m`; 1-based on the wire,
+  no coordinate limit. This is what `vty`/Brick apps enable.
+- `MouseX10` emits the legacy `\ESC[M` + offset-byte form for apps that enable
+  only `\ESC[?1000h` tracking; it cannot address columns or rows beyond 223.
+
+The target application only reacts to a click if it has enabled mouse
+tracking; a click on an app without mouse tracking is silently ignored.
 
 ### 4.7 Snapshot DSL
 
@@ -294,6 +319,7 @@ Methods:
 - `initialize`
 - `launch`
 - `sendKey`
+- `click`
 - `sendText`
 - `sendLine`
 - `currentView`
@@ -348,6 +374,23 @@ Example:
 Accepted string forms:
 - base: `Enter`, `Esc`, `Tab`, `Backspace`, arrows, `F1..F12`, single char
 - combos: `Ctrl+X`, `Alt+X`, `Shift+X`
+
+### 9.2a `click` format
+
+`click` accepts one of two targets plus optional button/encoding:
+- coordinate form: `col` and `row` (both 1-based)
+- selector form: `selector` (see §9.3)
+- optional `button`: `left` (default) | `middle` | `right`
+- optional `encoding`: `sgr` (default) | `x10`
+
+```json
+{"method":"click","params":{"col":12,"row":7}}
+{"method":"click","params":{"selector":{"type":"exact","text":"OK"},"button":"right"}}
+```
+
+Server coordinates are 1-based (converted to the 0-based DSL internally, like
+the `at` selector). The click emits a press and a release; the target app must
+have mouse tracking enabled to react.
 
 ### 9.3 Selector JSON format
 

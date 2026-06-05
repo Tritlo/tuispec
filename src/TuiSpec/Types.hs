@@ -11,8 +11,12 @@ module TuiSpec.Types (
     App (..),
     app,
     haskellApp,
+    ClickOptions (..),
+    defaultClickOptions,
     Key (..),
     Modifier (..),
+    MouseButton (..),
+    MouseEncoding (..),
     PtyHandle (..),
     Rect (..),
     RunOptions (..),
@@ -189,6 +193,45 @@ data Key
     | CharKey Char
     | NamedKey Text
     deriving (Eq, Show, Read)
+
+-- | Which mouse button a synthesized click uses.
+data MouseButton
+    = -- | Primary (left) button.
+      MouseLeft
+    | -- | Middle button.
+      MouseMiddle
+    | -- | Secondary (right) button.
+      MouseRight
+    deriving (Eq, Show, Read)
+
+{- | Wire encoding for synthesized mouse events.
+
+Most modern TUIs (anything built on @vty@\/Brick) enable SGR extended mouse
+mode, so 'MouseSGR' is the default. 'MouseX10' is the legacy fixed-byte
+encoding for applications that only enable @\\ESC[?1000h@ tracking; it cannot
+address columns or rows beyond 223.
+-}
+data MouseEncoding
+    = -- | SGR extended mouse mode (@\\ESC[\<btn;col;rowM@). 1-based, unbounded.
+      MouseSGR
+    | -- | Legacy X10 mouse mode (@\\ESC[M@ + offset bytes). Capped at 223.
+      MouseX10
+    deriving (Eq, Show, Read)
+
+-- | Button and encoding options for a synthesized mouse click.
+data ClickOptions = ClickOptions
+    { clickButton :: MouseButton
+    , clickEncoding :: MouseEncoding
+    }
+    deriving (Eq, Show, Read)
+
+-- | Default click options: left button, SGR encoding.
+defaultClickOptions :: ClickOptions
+defaultClickOptions =
+    ClickOptions
+        { clickButton = MouseLeft
+        , clickEncoding = MouseSGR
+        }
 
 -- | A rectangular region within the terminal viewport.
 data Rect = Rect
