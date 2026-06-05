@@ -112,6 +112,12 @@ Beyond the minimal example, the library exposes:
   ignored. Throws `ChoiceSelectionError` on failure.
 - `artifactRoot tui`, `artifactFile tui rel`, `writeArtifactFile tui rel txt`
   — locate and write into the per-test artifact directory.
+- `click tui col row` / `clickSelector tui selector` — simulate a mouse click
+  at a 0-based coordinate or on the element a selector matches (Playwright
+  style; honors `ambiguityMode`). Use `clickWith` / `clickSelectorWith` with
+  `ClickOptions` to choose the button or the legacy X10 encoding. The target
+  app must have mouse tracking enabled (`vty`/Brick apps do once mouse mode is
+  on); the default SGR encoding suits any modern TUI.
 - `currentViewRect tui rect` — return the viewport text cropped to a region.
 - `dumpFailureBundle` / `withFailureBundle` — capture diagnostic state on
   failure (snapshot + viewport + action log + warnings + exit status).
