@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.1.0 — 2026-06-06
 
 * Add mouse click simulation. DSL: `click`/`clickWith` (0-based coordinate) and `clickSelector`/`clickSelectorWith` (Playwright-style, resolves a selector to its match origin and honors `ambiguityMode`). New `MouseButton`, `MouseEncoding`, and `ClickOptions`/`defaultClickOptions` types. JSON-RPC: a `click` method accepting either `{col,row}` (1-based) or `{selector}`, with optional `button` and `encoding`. Clicks emit a press + release; SGR encoding is the default (what `vty`/Brick enable), with an `x10` override.
 
