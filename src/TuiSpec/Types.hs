@@ -168,7 +168,7 @@ defaultRunOptions =
 
 -- | The tuispec library/protocol version.
 tuispecVersion :: String
-tuispecVersion = "0.3.1.0"
+tuispecVersion = "0.3.1.1"
 
 -- | Key modifiers for combo key presses.
 data Modifier

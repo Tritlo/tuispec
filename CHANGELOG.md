@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1.1 — 2026-06-06
+
+* Fix selector clicks landing on the wrong column. A regex/substring selector resolved to its matching line's first non-blank column instead of the actual match position, so clicking centred text (e.g. a label behind a box border) hit the line's left edge and missed. `regexOrigins` now reports the match's start column via new origin-returning matchers `regexLikeMatchOrigin`/`wildcardContainsOrigin`, in terms of which the boolean `regexLikeMatch`/`wildcardContains` are now defined (so match and origin can't diverge).
+
 ## 0.3.1.0 — 2026-06-06
 
 * Add mouse click simulation. DSL: `click`/`clickWith` (0-based coordinate) and `clickSelector`/`clickSelectorWith` (Playwright-style, resolves a selector to its match origin and honors `ambiguityMode`). New `MouseButton`, `MouseEncoding`, and `ClickOptions`/`defaultClickOptions` types. JSON-RPC: a `click` method accepting either `{col,row}` (1-based) or `{selector}`, with optional `button` and `encoding`. Clicks emit a press + release; SGR encoding is the default (what `vty`/Brick enable), with an `x10` override.

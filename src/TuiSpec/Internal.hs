@@ -19,8 +19,10 @@ module TuiSpec.Internal (
 
     -- * Pattern matching
     regexLikeMatch,
+    regexLikeMatchOrigin,
     cleanPattern,
     wildcardContains,
+    wildcardContainsOrigin,
 
     -- * Theme helpers
     resolveAutoSnapshotTheme,
@@ -33,6 +35,7 @@ module TuiSpec.Internal (
 import Control.Exception (SomeException, catch)
 import Data.Char (isAlphaNum, toLower)
 import Data.List (isSuffixOf)
+import Data.Maybe (isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Text.Read (readMaybe)
@@ -79,7 +82,18 @@ Supports @|@ alternation and @.*@ wildcards.
 -}
 regexLikeMatch :: Text -> Text -> Bool
 regexLikeMatch patternText haystack =
-    any (`wildcardContains` haystack) alternatives
+    isJust (regexLikeMatchOrigin patternText haystack)
+
+{- | Like 'regexLikeMatch', but returns the 0-based column where the match
+begins — the start of the first literal segment of the earliest-matching
+alternative. This is the position a user sees and would click, so selector
+clicks must target it rather than, say, the line's first non-blank column.
+-}
+regexLikeMatchOrigin :: Text -> Text -> Maybe Int
+regexLikeMatchOrigin patternText haystack =
+    case [col | alt <- alternatives, Just col <- [wildcardContainsOrigin alt haystack]] of
+        [] -> Nothing
+        cols -> Just (minimum cols)
   where
     alternatives =
         filter (not . T.null) $
@@ -92,7 +106,23 @@ cleanPattern = T.filter (`notElem` ("()" :: String))
 -- | Check whether a @.*@-delimited pattern matches within a haystack.
 wildcardContains :: Text -> Text -> Bool
 wildcardContains patternText haystack =
-    checkSegments 0 segments
+    isJust (wildcardContainsOrigin patternText haystack)
+
+{- | Like 'wildcardContains', but returns the 0-based start column of the match
+— the position of the first literal (non-@.*@) segment — or 'Nothing'. A
+pattern that is empty or all wildcards matches at column 0.
+-}
+wildcardContainsOrigin :: Text -> Text -> Maybe Int
+wildcardContainsOrigin patternText haystack =
+    case segments of
+        [] -> Just 0
+        (firstSeg : rest) ->
+            let (prefix, suffix) = T.breakOn firstSeg haystack
+                firstCol = T.length prefix
+             in if not (T.null suffix)
+                    && checkSegments (firstCol + T.length firstSeg) rest
+                    then Just firstCol
+                    else Nothing
   where
     segments = filter (not . T.null) (T.splitOn ".*" patternText)
 

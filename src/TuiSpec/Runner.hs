@@ -91,7 +91,7 @@ import System.Timeout (timeout)
 import Test.Tasty (TestTree)
 import Test.Tasty.HUnit (assertFailure, testCase)
 import Text.Read (readMaybe)
-import TuiSpec.Internal (cleanPattern, ignoreIOError, regexLikeMatch, resolveAutoSnapshotTheme, safeFileStem, safeIndex, snapshotMetadataPath, wildcardContains)
+import TuiSpec.Internal (cleanPattern, ignoreIOError, regexLikeMatch, regexLikeMatchOrigin, resolveAutoSnapshotTheme, safeFileStem, safeIndex, snapshotMetadataPath, wildcardContains)
 import TuiSpec.ProjectRoot (resolveProjectRoot)
 import TuiSpec.Replay (RecordingDirection (DirectionFrame), RecordingEvent (..))
 import TuiSpec.Types
@@ -1972,13 +1972,14 @@ selectorOrigin selector viewport =
             listToMaybe (regexOrigins patternText (viewportText viewport))
 
 {- | All 0-based @(col, row)@ origins of a lightweight regex pattern, one per
-matching line, taken at the line's first non-blank column.
+matching line, at the column where the pattern's first literal segment matches
+(so a selector click lands on the matched text, not the line's left edge).
 -}
 regexOrigins :: Text -> Text -> [(Int, Int)]
 regexOrigins patternText textValue =
-    [ (T.length (T.takeWhile (== ' ') line), rowIdx)
+    [ (col, rowIdx)
     | (rowIdx, line) <- zip [0 ..] (T.lines textValue)
-    , regexLikeMatch patternText line
+    , Just col <- [regexLikeMatchOrigin patternText line]
     ]
 
 -- | All 0-based @(col, row)@ origins of a literal substring within viewport text.
